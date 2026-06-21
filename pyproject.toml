@@ -26,6 +26,9 @@ dev = [
     "mypy>=1.0",
     "types-pyyaml>=6.0",
 ]
+viz = [
+    "Pillow>=9.0",
+]
 
 [project.scripts]
 pickup-putdown = "pickup_putdown.cli:main"

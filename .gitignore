@@ -207,3 +207,7 @@ __marimo__/
 .mcp.json
 opencode.json
 .claude
+
+# Local data and generated artifacts
+data/
+artifacts/
