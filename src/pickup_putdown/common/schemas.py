@@ -37,6 +37,14 @@ class Clip(BaseModel):
     split: str | None = None
     session_id: str | None = None
     notes: str | None = None
+    etag: str | None = None
+    object_size_bytes: int = 0
+    video_codec: str | None = None
+    audio_codec: str | None = None
+    decode_ok: bool = True
+    probe_error: str | None = None
+    duplicate_of: str | None = None
+    probe_fps: float | None = None
 
     @field_validator("duration_s", "fps", "active_start_s", "active_end_s")
     @classmethod

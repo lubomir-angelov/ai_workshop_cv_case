@@ -40,8 +40,8 @@ task_13_optional ───────────── task_18_optional
 
 | ID | Difficulty | Task | Primary output | Dependencies |
 |---|---|---|---|---|
-| `task_1` | `easy` | [Repository Bootstrap, Configuration, and Core Schemas](task_1_repository_bootstrap_easy.md) | Installable `pickup_putdown` Python package | None |
-| `task_2` | `medium` | [Cloud Inventory, Video Metadata, and Bounded Cache](task_2_storage_inventory_cache_medium.md) | Bucket/object listing command | Task 1 schemas and configuration. |
+~~| `task_1` | `easy` | [Repository Bootstrap, Configuration, and Core Schemas](task_1_repository_bootstrap_easy.md) | Installable `pickup_putdown` Python package | None |~~
+~~| `task_2` | `medium` | [Cloud Inventory, Video Metadata, and Bounded Cache](task_2_storage_inventory_cache_medium.md) | Bucket/object listing command | Task 1 schemas and configuration. |~~
 | `task_3` | `medium` | [Layer 0A Person Triage and Active-Span Extraction](task_3_stage_a_person_triage_medium.md) | Direct video-file person tracking | Tasks 1 and 2. |
 | `task_4` | `easy` | [Shelf and Surface Region Configuration](task_4_shelf_region_configuration_easy.md) | `configs/shelves.yaml` | Task 1 only. A representative frame from the camera is required. |
 | `task_5` | `hard` | [Layer 0B Pose Tracking and Actor-Specific Interaction Proposals](task_5_stage_b_interaction_proposals_hard.md) | Higher-rate pose inference over active spans | Tasks 3 and 4. |

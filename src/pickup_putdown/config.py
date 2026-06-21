@@ -66,7 +66,7 @@ def _build_env_overrides() -> dict[str, Any]:
     for env_key, env_value in os.environ.items():
         if not env_key.startswith(prefix):
             continue
-        rest = env_key[len(prefix):].lower()
+        rest = env_key[len(prefix) :].lower()
         parts = rest.split("_", 1)
         if len(parts) != 2:
             continue

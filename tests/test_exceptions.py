@@ -1,6 +1,5 @@
 """Tests for the exception hierarchy and exit codes."""
 
-
 from pickup_putdown.common.exceptions import (
     ConfigError,
     DataError,
@@ -50,4 +49,5 @@ class TestExitCodes:
     def test_subclass_gets_parent_code(self):
         class MyConfigError(ConfigError):
             pass
+
         assert get_exit_code(MyConfigError()) == 2
