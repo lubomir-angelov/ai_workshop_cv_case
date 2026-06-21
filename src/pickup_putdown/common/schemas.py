@@ -194,6 +194,11 @@ class Candidate(BaseModel):
     raw_end_s: float
     window_start_s: float
     window_end_s: float
+    n_raw_interactions: int = 1
+    min_region_distance: float | None = None
+    max_wrist_confidence: float | None = None
+    total_dwell_duration_s: float = 0.0
+    config_fingerprint: str | None = None
     proposal_reason: str | None = None
     proposal_score: float | None = None
     review_status: str = "pending"
@@ -204,6 +209,80 @@ class Candidate(BaseModel):
         if v < 0:
             raise ValueError("timestamp must be non-negative")
         return v
+
+    @field_validator("raw_end_s")
+    @classmethod
+    def raw_end_after_raw_start(cls, v: float, info) -> float:
+        if hasattr(info, "data") and isinstance(info.data, dict):
+            raw_start = info.data.get("raw_start_s")
+            if raw_start is not None and v <= raw_start:
+                raise ValueError("raw_end_s must be greater than raw_start_s")
+        return v
+
+    @field_validator("window_end_s")
+    @classmethod
+    def window_end_after_window_start(cls, v: float, info) -> float:
+        if hasattr(info, "data") and isinstance(info.data, dict):
+            window_start = info.data.get("window_start_s")
+            if window_start is not None and v <= window_start:
+                raise ValueError("window_end_s must be greater than window_start_s")
+        return v
+
+
+class PoseObservation(BaseModel):
+    """One row per actor, timestamp, and hand side in tracks_pose.parquet."""
+
+    clip_id: str
+    timestamp_s: float
+    source_frame_index: int | None = None
+    sample_index: int
+    actor_id: str
+    hand_side: str  # "left" or "right"
+    wrist_x: float
+    wrist_y: float
+    wrist_confidence: float
+    person_bbox_x1: float | None = None
+    person_bbox_y1: float | None = None
+    person_bbox_x2: float | None = None
+    person_bbox_y2: float | None = None
+    pose_association_confidence: float | None = None
+    is_valid: bool = True
+
+    @field_validator("timestamp_s")
+    @classmethod
+    def non_negative_timestamp(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("timestamp must be non-negative")
+        return v
+
+
+class RawInteraction(BaseModel):
+    """A single wrist-inside-region observation meeting minimum duration."""
+
+    clip_id: str
+    actor_id: str
+    hand_side: str
+    region_id: str
+    start_s: float
+    end_s: float
+    n_observations: int = 0
+    mean_wrist_confidence: float = 0.0
+    mean_distance: float = 0.0
+
+
+class ProposalRecallResult(BaseModel):
+    """Per-event or aggregate proposal-recall result."""
+
+    event_id: str | None = None
+    clip_id: str
+    gt_type: str
+    gt_t_start: float
+    gt_t_end: float
+    covered: bool = False
+    coverage_method: str | None = None
+    matching_candidate_id: str | None = None
+    actor_match: bool | None = None
+    region_match: bool | None = None
 
 
 # ---------------------------------------------------------------------------

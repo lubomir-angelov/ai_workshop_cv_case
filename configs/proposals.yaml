@@ -1,0 +1,110 @@
+# Layer 0B — Pose Tracking and Actor-Specific Interaction Proposals
+#
+# This configuration is used by the "propose" CLI command to generate
+# tracks_pose.parquet and candidates.parquet.
+#
+# Candidates are proposals only. They must never be written to
+# events.csv or predictions.csv.
+
+# ---------------------------------------------------------------------------
+# Pose inference
+# ---------------------------------------------------------------------------
+pose:
+  model_path: "models/pose_detector.pt"
+  # Target FPS for pose inference. 8 FPS is the default starting point.
+  # Later acceptance runs can compare 8, 4, and 2 FPS.
+  target_fps: 8
+  image_size: 640
+  device: "auto"
+  half: false
+  # Minimum confidence for a wrist keypoint to be recorded.
+  pose_confidence: 0.30
+  max_detections: 100
+  # When true, pose is only run over person-active spans.
+  process_active_spans_only: true
+
+# ---------------------------------------------------------------------------
+# Actor association
+# ---------------------------------------------------------------------------
+actor_association:
+  # Minimum person-detection confidence to consider for matching.
+  min_actor_confidence: 0.30
+  # IoU threshold for matching a pose detection to an actor track.
+  # Detections below this threshold are left unmatched.
+  match_iou_threshold: 0.15
+  # Maximum time gap (seconds) between a pose detection and a person
+  # observation for them to be considered a match.
+  max_gap_s: 0.5
+  # Allow pose detections that cannot be matched to any actor track.
+  allow_unmatched: true
+
+# ---------------------------------------------------------------------------
+# Region-based measurements
+# ---------------------------------------------------------------------------
+region_measurements:
+  # Override the shelf expansion margin (pixels) for proposal computation.
+  # When null, the value from configs/shelves.yaml is used.
+  expanded_margin_override: null
+  # Minimum wrist confidence for a wrist observation to count as a
+  # valid interaction signal.
+  min_wrist_confidence: 0.30
+  # Minimum duration (seconds) that a wrist must stay inside (or near)
+  # an expanded region to form a raw interaction.
+  min_dwell_duration_s: 0.25
+  # Number of frames over which to compute wrist velocity.
+  velocity_window_frames: 5
+  # Threshold for velocity reversal detection (cosine similarity < this
+  # indicates a direction change).
+  reversal_threshold: 0.30
+  # Maximum gap (seconds) between wrist observations inside a region
+  # before the interaction is considered broken.
+  gap_tolerance_s: 0.5
+
+# ---------------------------------------------------------------------------
+# Proposal generation
+# ---------------------------------------------------------------------------
+proposals:
+  # Target FPS for pose inference (alias for pose.target_fps).
+  target_fps: 8
+  # Minimum wrist confidence for raw interaction detection.
+  minimum_wrist_confidence: 0.30
+  # Minimum duration (seconds) for a raw interaction.
+  minimum_interaction_duration_s: 0.25
+  # Maximum gap (seconds) between raw interactions for the same
+  # actor/hand/region before they are merged into one candidate.
+  merge_gap_s: 1.0
+  # Pre-context (seconds) added before the raw interaction start.
+  context_before_s: 2.0
+  # Post-context (seconds) added after the raw interaction end.
+  context_after_s: 2.0
+  # Maximum candidate duration (seconds). Longer candidates are trimmed.
+  maximum_candidate_duration_s: 10.0
+  # Optional trajectory smoothing applied before region measurements.
+  trajectory_smoothing: false
+  # Smoothing window size (odd integer) for moving-average smoothing.
+  smoothing_window: 3
+
+# ---------------------------------------------------------------------------
+# Preview rendering
+# ---------------------------------------------------------------------------
+preview:
+  preview_fps: 4.0
+  max_output_width: 1280
+  max_output_height: 720
+  draw_actor_box: true
+  draw_wrist_positions: true
+  draw_region_polygons: true
+  draw_region_labels: true
+  draw_candidate_intervals: true
+  text_scale: 0.5
+  line_thickness: 2
+
+# ---------------------------------------------------------------------------
+# Output paths (relative to output_dir)
+# ---------------------------------------------------------------------------
+# output:
+#   tracks_pose: "tracks_pose.parquet"
+#   candidates: "candidates.parquet"
+#   previews: "candidate_previews"
+#   resolved_config: "resolved_proposals_config.yaml"
+#   proposal_recall: "proposal_recall.json"

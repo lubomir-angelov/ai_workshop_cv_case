@@ -711,3 +711,336 @@ def triage_comparison(
     typer.echo(f"  Clips compared:      {len(df)}")
     typer.echo(f"  Decisions changed:   {df['decision_changed'].sum()}")
     typer.echo(f"  Output:              {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Propose command (Layer 0B)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def propose(
+    input_path: str = typer.Argument(..., help="Path to a video file or directory of videos."),
+    config: str = typer.Option(
+        "configs/proposals.yaml",
+        "--config",
+        "-c",
+        help="Path to proposals configuration YAML file.",
+    ),
+    shelves_config: str = typer.Option(
+        "configs/shelves.yaml",
+        "--shelves-config",
+        help="Path to shelf/surface region configuration YAML file.",
+    ),
+    person_tracks: str = typer.Option(
+        None,
+        "--person-tracks",
+        "-p",
+        help="Path to tracks_person.parquet (from triage).",
+    ),
+    output_dir: str = typer.Option(
+        "outputs",
+        "--output-dir",
+        "-o",
+        help="Base directory for output files.",
+    ),
+    render_previews: bool = typer.Option(
+        False,
+        "--render-previews",
+        "-r",
+        help="Render candidate preview clips.",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable debug logging.",
+    ),
+) -> None:
+    """Run pose inference and generate actor-specific interaction candidates.
+
+    Produces tracks_pose.parquet, candidates.parquet, and optionally candidate
+    preview clips.  Candidates are proposals only and must never be written to
+    events.csv or predictions.csv.
+    """
+    _setup_logging(verbose)
+
+    import json
+    import subprocess
+    from pathlib import Path
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import yaml
+
+    from pickup_putdown.config import load_config
+    from pickup_putdown.ingestion.video_probe import probe_video
+    from pickup_putdown.perception.proposals import (
+        associate_poses_with_actors,
+        detect_raw_interactions,
+        generate_candidates,
+    )
+    from pickup_putdown.perception.shelf_regions import (
+        get_expanded_regions,
+        get_regions_for_camera,
+        load_shelf_config,
+    )
+
+    cfg_path = Path(config)
+    cfg = load_config(cfg_path)
+
+    output_base = Path(output_dir)
+    output_base.mkdir(parents=True, exist_ok=True)
+
+    # Load shelf config
+    shelf_cfg = load_shelf_config(shelves_config)
+    camera_id = next(iter(shelf_cfg.cameras), "store_camera_01")
+    camera_config = get_regions_for_camera(shelf_cfg, camera_id)
+    expanded_regions = get_expanded_regions(camera_config)
+
+    # Load person tracks if provided
+    person_observations: list[dict] = []
+    if person_tracks and Path(person_tracks).exists():
+        person_table = pq.read_table(person_tracks)
+        person_observations = person_table.to_pandas().to_dict("records")
+        typer.echo(f"Loaded {len(person_observations)} person observations.")
+
+    # Resolve video paths
+    video_paths = _resolve_video_paths(input_path, output_dir)
+    typer.echo(f"Propose: {len(video_paths)} video(s) to process.")
+
+    all_pose_obs: list[dict] = []
+    all_candidates: list[dict] = []
+    clip_durations: dict[str, float] = {}
+    clip_fps: dict[str, float] = {}
+
+    for vp in video_paths:
+        stem = vp.stem
+        clip_id = f"clip_{stem}"
+        typer.echo(f"  Processing {vp.name}...")
+
+        probe = probe_video(vp)
+        if not probe.decode_ok:
+            typer.echo(f"    Decode failed: {probe.probe_error}")
+            continue
+
+        duration_s = probe.duration_s or 0.0
+        fps = probe.fps or 0.0
+        clip_durations[clip_id] = duration_s
+        clip_fps[clip_id] = fps
+
+        # Run pose tracker
+        from pickup_putdown.perception.pose_tracker import PoseTracker
+
+        pose_tracker = PoseTracker(video_path=vp, pose_cfg=cfg.pose)
+        pose_results = pose_tracker.run()
+        pose_dicts = [o.model_dump() for o in pose_results]
+        all_pose_obs.extend(pose_dicts)
+        typer.echo(f"    {len(pose_results)} pose observations")
+
+        # Associate poses with actors
+        if person_observations:
+            from pickup_putdown.common.schemas import PersonObservation as PObs
+
+            person_obs_objs = [
+                PObs(**po) for po in person_observations if po.get("clip_id") == clip_id
+            ]
+            associated = associate_poses_with_actors(
+                pose_results, person_obs_objs, cfg.actor_association
+            )
+        else:
+            associated = pose_results
+
+        # Detect raw interactions
+        raw_interactions = detect_raw_interactions(
+            associated, camera_config, cfg.proposals, cfg.region_measurements
+        )
+        typer.echo(f"    {len(raw_interactions)} raw interactions")
+
+        # Generate candidates
+        candidates = generate_candidates(raw_interactions, clip_durations, cfg.proposals)
+        cand_dicts = [c.model_dump() for c in candidates]
+        all_candidates.extend(cand_dicts)
+        typer.echo(f"    {len(candidates)} candidates")
+
+        # Optional preview rendering
+        if render_previews and candidates:
+            from pickup_putdown.perception.candidate_previews import (
+                CandidateOverlayConfig,
+                render_candidate_preview,
+            )
+
+            preview_dir = output_base / "candidate_previews"
+            preview_dir.mkdir(parents=True, exist_ok=True)
+
+            for cand in candidates:
+                cand_pose_obs = [o for o in associated if o.clip_id == cand.clip_id]
+                orig_poly = (
+                    camera_config.regions[0].points
+                    if camera_config.regions
+                    else [(0, 0), (100, 0), (100, 100)]
+                )
+                exp_poly = expanded_regions.get(cand.region_id or "", orig_poly)
+                out_preview = preview_dir / f"{cand.candidate_id}.mp4"
+                try:
+                    render_candidate_preview(
+                        vp,
+                        cand,
+                        cand_pose_obs,
+                        orig_poly,
+                        exp_poly,
+                        out_preview,
+                        config=CandidateOverlayConfig(
+                            draw_actor_box=cfg.preview.draw_actor_box,
+                            draw_wrist_positions=cfg.preview.draw_wrist_positions,
+                            draw_region_polygons=cfg.preview.draw_region_polygons,
+                            draw_region_labels=cfg.preview.draw_region_labels,
+                            draw_candidate_intervals=cfg.preview.draw_candidate_intervals,
+                            text_scale=cfg.preview.text_scale,
+                            line_thickness=cfg.preview.line_thickness,
+                            max_output_width=cfg.preview.max_output_width,
+                            max_output_height=cfg.preview.max_output_height,
+                            preview_fps=cfg.preview.preview_fps,
+                        ),
+                        clip_duration_s=duration_s,
+                    )
+                except Exception as exc:
+                    logger.warning("Preview failed for candidate %s: %s", cand.candidate_id, exc)
+
+    # Write tracks_pose.parquet
+    if all_pose_obs:
+        pose_table = pa.Table.from_pylist(all_pose_obs)
+    else:
+        pose_schema = pa.schema(
+            [
+                ("clip_id", pa.string()),
+                ("timestamp_s", pa.float64()),
+                ("source_frame_index", pa.int64()),
+                ("sample_index", pa.int64()),
+                ("actor_id", pa.string()),
+                ("hand_side", pa.string()),
+                ("wrist_x", pa.float64()),
+                ("wrist_y", pa.float64()),
+                ("wrist_confidence", pa.float64()),
+                ("person_bbox_x1", pa.float64()),
+                ("person_bbox_y1", pa.float64()),
+                ("person_bbox_x2", pa.float64()),
+                ("person_bbox_y2", pa.float64()),
+                ("pose_association_confidence", pa.float64()),
+                ("is_valid", pa.bool_()),
+            ]
+        )
+        pose_table = pa.Table.from_pydict(
+            {
+                "clip_id": [],
+                "timestamp_s": [],
+                "source_frame_index": [],
+                "sample_index": [],
+                "actor_id": [],
+                "hand_side": [],
+                "wrist_x": [],
+                "wrist_y": [],
+                "wrist_confidence": [],
+                "person_bbox_x1": [],
+                "person_bbox_y1": [],
+                "person_bbox_x2": [],
+                "person_bbox_y2": [],
+                "pose_association_confidence": [],
+                "is_valid": [],
+            },
+            schema=pose_schema,
+        )
+    pq.write_table(pose_table, str(output_base / "tracks_pose.parquet"))
+
+    # Write candidates.parquet
+    if all_candidates:
+        cand_table = pa.Table.from_pylist(all_candidates)
+    else:
+        cand_schema = pa.schema(
+            [
+                ("candidate_id", pa.string()),
+                ("clip_id", pa.string()),
+                ("actor_id", pa.string()),
+                ("hand_side", pa.string()),
+                ("region_id", pa.string()),
+                ("raw_start_s", pa.float64()),
+                ("raw_end_s", pa.float64()),
+                ("window_start_s", pa.float64()),
+                ("window_end_s", pa.float64()),
+                ("n_raw_interactions", pa.int64()),
+                ("min_region_distance", pa.float64()),
+                ("max_wrist_confidence", pa.float64()),
+                ("total_dwell_duration_s", pa.float64()),
+                ("config_fingerprint", pa.string()),
+                ("proposal_reason", pa.string()),
+                ("proposal_score", pa.float64()),
+                ("review_status", pa.string()),
+            ]
+        )
+        cand_table = pa.Table.from_pydict(
+            {
+                "candidate_id": [],
+                "clip_id": [],
+                "actor_id": [],
+                "hand_side": [],
+                "region_id": [],
+                "raw_start_s": [],
+                "raw_end_s": [],
+                "window_start_s": [],
+                "window_end_s": [],
+                "n_raw_interactions": [],
+                "min_region_distance": [],
+                "max_wrist_confidence": [],
+                "total_dwell_duration_s": [],
+                "config_fingerprint": [],
+                "proposal_reason": [],
+                "proposal_score": [],
+                "review_status": [],
+            },
+            schema=cand_schema,
+        )
+    pq.write_table(cand_table, str(output_base / "candidates.parquet"))
+
+    # Write resolved config
+    resolved = {
+        "pose": cfg.pose.model_dump(),
+        "actor_association": cfg.actor_association.model_dump(),
+        "region_measurements": cfg.region_measurements.model_dump(),
+        "proposals": cfg.proposals.model_dump(),
+        "preview": cfg.preview.model_dump(),
+    }
+    with open(output_base / "resolved_proposals_config.yaml", "w") as f:
+        yaml.dump(resolved, f, default_flow_style=False)
+
+    # Write run metadata
+    try:
+        git_commit = (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
+    except Exception:
+        git_commit = "unknown"
+
+    metadata = {
+        "git_commit": git_commit,
+        "proposals_config": str(cfg_path),
+        "shelves_config": shelves_config,
+        "n_videos": len(video_paths),
+        "n_pose_observations": len(all_pose_obs),
+        "n_candidates": len(all_candidates),
+        "target_fps": cfg.proposals.target_fps,
+    }
+    with open(output_base / "propose_run_metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    typer.echo("")
+    typer.echo("=== Propose Summary ===")
+    typer.echo(f"  Videos processed:    {len(video_paths)}")
+    typer.echo(f"  Pose observations:   {len(all_pose_obs)}")
+    typer.echo(f"  Candidates:          {len(all_candidates)}")
+    typer.echo(f"  Tracks pose parquet: {output_base / 'tracks_pose.parquet'}")
+    typer.echo(f"  Candidates parquet:  {output_base / 'candidates.parquet'}")
+    typer.echo(f"  Resolved config:     {output_base / 'resolved_proposals_config.yaml'}")
+    if render_previews:
+        typer.echo(f"  Previews dir:        {output_base / 'candidate_previews'}")
