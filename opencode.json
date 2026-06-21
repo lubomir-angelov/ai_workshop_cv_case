@@ -1,0 +1,322 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "llamacpp/Qwen3.6-35B-A3B-UD-Q4_K_XL",
+  "share": "disabled",
+  "autoupdate": false,
+  "permission": {
+    "bash": {
+      "*": "ask",
+      "pwd": "allow",
+      "ls *": "allow",
+      "find *": "allow",
+      "grep *": "allow",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "docker compose ps*": "allow",
+      "docker compose logs*": "allow",
+      "ruff check*": "allow",
+      "python -m pytest*": "allow",
+      "pytest*": "allow",
+      "rm *": "deny",
+      "rm -r*": "deny",
+      "rm -f*": "deny",
+      "rm -rf*": "deny",
+      "rm -fr*": "deny",
+      "sudo rm *": "deny",
+      "find * -delete*": "deny",
+      "find * -exec rm*": "deny",
+      "git clean*": "deny",
+      "git reset --hard*": "deny",
+      "git checkout -- *": "deny",
+      "docker system prune*": "deny",
+      "docker volume prune*": "deny",
+      "docker compose down -v*": "deny",
+      "make reset-db*": "deny",
+      "make clean*": "ask",
+      "make down*": "ask",
+      "sudo *": "deny"
+    },
+    "external_directory": "deny"
+  },
+  "mcp": {
+    "context-engine": {
+      "type": "local",
+      "command": [
+        "/home/lubom/.local/bin/cce",
+        "serve",
+        "--project-dir",
+        "/home/lubom/repos/ai_workshop_cv_case"
+      ]
+    },
+  },
+  "provider": {
+    "llamacpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama.cpp local Qwen3.6 35B A3B Q4",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1"
+      },
+      "models": {
+        "Qwen3.6-35B-A3B-UD-Q4_K_XL": {
+          "name": "Qwen3.6-35B-A3B-UD-Q4_K_XL",
+          "limit": {
+            "context": 131072,
+            "output": 16384
+          }
+        }
+      }
+    }
+  },
+  "instructions": [
+    "AGENTS.md"
+  ],
+  "watcher": {
+    "ignore": [
+      ".git/**",
+      ".venv/**",
+      "venv/**",
+      "__pycache__/**",
+      ".pytest_cache/**",
+      ".ruff_cache/**",
+      ".mypy_cache/**",
+      "htmlcov/**",
+      "dist/**",
+      "build/**",
+      "*.egg-info/**",
+      "data/**",
+      "exports/**",
+      "uploads/**",
+      "tmp/**",
+      "logs/**",
+      ".agent/**",
+      "artifacts/**"
+    ]
+  },
+  "agent": {
+    "build": {
+      "description": "Primary implementation agent for ai_workshop_cv_case.",
+      "mode": "primary",
+      "model": "llamacpp/Qwen3.6-35B-A3B-UD-Q4_K_XL",
+      "temperature": 0.1,
+      "top_p": 0.8,
+      "steps": 30,
+      "permission": {
+        "read": "allow",
+        "list": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "edit": "allow",
+        "lsp": "allow",
+        "todowrite": "allow",
+        "task": {
+          "*": "deny",
+          "explorer": "allow",
+          "reviewer": "allow",
+          "implementator": "allow"
+        },
+        "bash": {
+          "*": "ask",
+          "pwd": "allow",
+          "ls *": "allow",
+          "find *": "allow",
+          "grep *": "allow",
+          "git status*": "allow",
+          "git diff*": "allow",
+          "git log*": "allow",
+          "python --version": "allow",
+          "python -m compileall *": "allow",
+          "python -m pytest*": "allow",
+          "pytest*": "allow",
+          "ruff check*": "allow",
+          "ruff format --check*": "allow",
+          "make test*": "allow",
+          "make lint*": "allow",
+          "make ruff*": "allow",
+          "make format-check*": "allow",
+          "make run*": "ask",
+          "make up-db*": "ask",
+          "make down*": "ask",
+          "make reset-db*": "ask",
+          "docker compose up*": "ask",
+          "docker compose down*": "ask",
+          "docker compose logs*": "allow",
+          "docker compose ps*": "allow",
+          "git add*": "ask",
+          "git commit*": "ask",
+          "git checkout*": "ask",
+          "git switch*": "ask",
+          "git reset*": "deny",
+          "git clean*": "deny",
+          "git push*": "deny",
+          "rm *": "deny",
+          "rm -r*": "deny",
+          "rm -f*": "deny",
+          "rm -rf*": "deny",
+          "rm -fr*": "deny",
+          "sudo *": "deny"
+        },
+        "external_directory": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
+    },
+    "plan": {
+      "description": "Read-only planning agent. Use before invasive code changes.",
+      "mode": "primary",
+      "model": "llamacpp/Qwen3.6-35B-A3B-UD-Q4_K_XL",
+      "temperature": 0.1,
+      "top_p": 0.8,
+      "steps": 20,
+      "permission": {
+        "read": "allow",
+        "list": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "lsp": "allow",
+        "edit": "deny",
+        "todowrite": "allow",
+        "task": {
+          "*": "deny",
+          "explorer": "allow",
+          "reviewer": "allow"
+        },
+        "bash": {
+          "*": "deny",
+          "pwd": "allow",
+          "ls *": "allow",
+          "find *": "allow",
+          "grep *": "allow",
+          "git status*": "allow",
+          "git diff*": "allow",
+          "git log*": "allow"
+        },
+        "external_directory": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
+    },
+    "explorer": {
+      "description": "Explores the codebase, inspects files, traces dependencies, and explains findings before implementation.",
+      "mode": "subagent",
+      "model": "llamacpp/Qwen3.6-35B-A3B-UD-Q4_K_XL",
+      "temperature": 0.1,
+      "top_p": 0.8,
+      "steps": 20,
+      "permission": {
+        "read": "allow",
+        "list": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "lsp": "allow",
+        "edit": "deny",
+        "bash": {
+          "*": "deny",
+          "pwd": "allow",
+          "ls *": "allow",
+          "find *": "allow",
+          "grep *": "allow",
+          "git status*": "allow",
+          "git diff*": "allow"
+        },
+        "external_directory": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
+    },
+    "implementator": {
+      "description": "Implements targeted changes after the relevant files and constraints are known.",
+      "mode": "subagent",
+      "model": "llamacpp/Qwen3.6-35B-A3B-UD-Q4_K_XL",
+      "temperature": 0.1,
+      "top_p": 0.8,
+      "steps": 25,
+      "permission": {
+        "read": "allow",
+        "list": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "lsp": "allow",
+        "edit": "allow",
+        "bash": {
+          "*": "ask",
+          "pwd": "allow",
+          "ls *": "allow",
+          "find *": "allow",
+          "grep *": "allow",
+          "git status*": "allow",
+          "git diff*": "allow",
+          "python -m compileall *": "allow",
+          "python -m pytest*": "allow",
+          "pytest*": "allow",
+          "ruff check*": "allow",
+          "ruff format --check*": "allow",
+          "make test*": "allow",
+          "make lint*": "allow",
+          "docker compose ps*": "allow",
+          "docker compose logs*": "allow",
+          "git add*": "ask",
+          "git commit*": "ask",
+          "git checkout*": "ask",
+          "git switch*": "ask",
+          "git reset*": "deny",
+          "git clean*": "deny",
+          "git push*": "deny",
+          "rm *": "deny",
+          "rm -r*": "deny",
+          "rm -f*": "deny",
+          "rm -rf*": "deny",
+          "rm -fr*": "deny",
+          "sudo *": "deny"
+        },
+        "external_directory": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
+    },
+    "reviewer": {
+      "description": "Reviews code changes for correctness, regression risk, tests, typing, and project conventions.",
+      "mode": "subagent",
+      "model": "llamacpp/Qwen3.6-35B-A3B-UD-Q4_K_XL",
+      "temperature": 0.1,
+      "top_p": 0.8,
+      "steps": 18,
+      "permission": {
+        "read": "allow",
+        "list": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "lsp": "allow",
+        "edit": "deny",
+        "bash": {
+          "*": "deny",
+          "git status*": "allow",
+          "git diff*": "allow",
+          "ruff check*": "allow",
+          "python -m pytest*": "allow",
+          "pytest*": "allow"
+        },
+        "external_directory": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
+    }
+  },
+  "command": {
+    "check": {
+      "description": "Run the normal project verification commands",
+      "agent": "build",
+      "template": "Run the available lint and test checks for this Python project. Prefer ruff and pytest. Summarize failures with exact files and suggested fixes."
+    },
+    "review": {
+      "description": "Review the current working tree changes",
+      "agent": "reviewer",
+      "template": "Review the current git diff for correctness, regressions, typing issues, FastAPI/MCP/CVAT/OCR mistakes, and missing tests. Do not edit files."
+    },
+    "plan-change": {
+      "description": "Plan a code change without editing",
+      "agent": "plan",
+      "template": "Inspect the relevant files and propose a minimal implementation plan. Do not edit files."
+    }
+  }
+}
