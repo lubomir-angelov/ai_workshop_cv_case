@@ -1,0 +1,18 @@
+# Storage configuration template for task_2.
+# Copy to configs/storage.yaml and fill in your values.
+# Secrets (credentials) should be set via environment variables:
+#   PICKUP_PUTDOWN_STORAGE_BUCKET_URI
+#   PICKUP_PUTDOWN_STORAGE_REGION
+#   PICKUP_PUTDOWN_STORAGE_ENDPOINT_URL
+#   PICKUP_PUTDOWN_STORAGE_ANONYMOUS
+
+storage:
+  bucket_uri: "s3://your-bucket/path/prefix"
+  region: "us-east-1"
+  endpoint_url: null        # null = AWS default; set for S3-compatible services
+  anonymous: false
+
+cache:
+  base_dir: "cache/downloads"
+  max_size_mb: 5120         # 5 GB default
+  max_count: 50
