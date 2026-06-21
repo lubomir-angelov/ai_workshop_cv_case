@@ -208,3 +208,4 @@ __marimo__/
 opencode.json
 .claude
 **.backup
+.local/
