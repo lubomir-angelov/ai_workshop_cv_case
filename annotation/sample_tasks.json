@@ -1,11 +1,11 @@
 [
   {
     "data": {
-      "video": "/videos/clip_001.mp4",
+      "video": "/resources/annotations/clip_001.mp4",
       "clip_id": "clip_001",
-      "fps": 30.0,
-      "active_start_s": 5.0,
-      "active_end_s": 25.0
+      "fps": 34.0,
+      "active_start_s": 0.0,
+      "active_end_s": 27.750
     },
     "predictions": [
       {
@@ -35,11 +35,11 @@
   },
   {
     "data": {
-      "video": "/videos/clip_002.mp4",
+      "video": "/resources/annotations/clip_002.mp4",
       "clip_id": "clip_002",
-      "fps": 30.0,
-      "active_start_s": 2.0,
-      "active_end_s": 15.0
+      "fps": 34.0,
+      "active_start_s": 0.0,
+      "active_end_s": 26.750
     },
     "predictions": []
   }
