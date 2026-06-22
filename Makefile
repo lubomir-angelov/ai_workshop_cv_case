@@ -352,35 +352,12 @@ annotation-status: ## Show service status
 annotation-logs: ## Follow or print Label Studio logs
 	@$(ANNOTATION_COMPOSE) logs -f
 
-annotation-config-validate: ## Validate that the shared XML exists, is well-formed, and contains required controls and labels
-	@test -f annotation/label_studio_config.xml || \
-		(echo "Missing annotation/label_studio_config.xml" && exit 1)
-	@python -c "\
-	import xml.etree.ElementTree as ET; \
-	ET.parse('annotation/label_studio_config.xml'); \
-	print('XML is well-formed.'); \
-	tree = ET.parse('annotation/label_studio_config.xml'); \
-	root = tree.getroot(); \
-	controls = set(); \
-	labels = set(); \
-	for elem in root.iter(): \
-	    tag = elem.tag.lower(); \
-	    if tag in ('timelabels', 'choices', 'rectanglelabels', 'textarea', 'checkbox'): \
-	        controls.add(tag); \
-	    for lbl in elem.findall('.//Label'): \
-	        labels.add(lbl.get('value', '')); \
-	required_controls = {'timelabels'}; \
-	missing_controls = required_controls - controls; \
-	if missing_controls: \
-	    print(f'WARNING: Missing required controls: {missing_controls}'); \
-	required_labels = {'pickup', 'putdown', 'ignore'}; \
-	missing_labels = required_labels - labels; \
-	if missing_labels: \
-	    print(f'WARNING: Missing required labels: {missing_labels}'); \
-	print(f'Controls found: {sorted(controls)}'); \
-	print(f'Labels found: {sorted(labels)}'); \
-	print('Config validation passed.'); \
-	"
+ANNOTATION_CONFIG ?= annotation/label_studio_config.xml
+
+annotation-config-validate: ## Validate the shared Label Studio XML configuration
+	@test -f $(ANNOTATION_CONFIG) || \
+		(echo "Missing $(ANNOTATION_CONFIG)" && exit 1)
+	@$(PYTHON) -c "import sys, xml.etree.ElementTree as ET; p='$(ANNOTATION_CONFIG)'; root=ET.parse(p).getroot(); local=lambda e: e.tag.rsplit('}', 1)[-1].lower(); controls={local(e) for e in root.iter()}; labels={e.get('value', '') for e in root.iter() if local(e) == 'label'}; missing_controls={'timelinelabels'} - controls; missing_labels={'pickup', 'putdown', 'ignore'} - labels; missing_controls and sys.exit(f'Missing required controls: {sorted(missing_controls)}'); missing_labels and sys.exit(f'Missing required labels: {sorted(missing_labels)}'); print(f'XML is well-formed: {p}'); print(f'Controls found: {sorted(controls)}'); print(f'Labels found: {sorted(labels)}'); print('Config validation passed.')"
 
 annotation-test: ## Run annotation schema and import/export tests
 	$(PYTHON) -m pytest tests/test_annotation_export.py -v
