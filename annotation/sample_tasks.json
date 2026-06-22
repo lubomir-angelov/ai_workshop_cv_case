@@ -1,0 +1,46 @@
+[
+  {
+    "data": {
+      "video": "/videos/clip_001.mp4",
+      "clip_id": "clip_001",
+      "fps": 30.0,
+      "active_start_s": 5.0,
+      "active_end_s": 25.0
+    },
+    "predictions": [
+      {
+        "result": [
+          {
+            "id": "pred_001",
+            "from_name": "labels",
+            "to_name": "video",
+            "type": "timelabels",
+            "value": {
+              "start": 8.0,
+              "end": 10.5,
+              "labels": ["pickup"],
+              "item_count": 1,
+              "confidence": "high",
+              "hard_case": "false"
+            }
+          }
+        ],
+        "score": 0.72,
+        "model_source": "wrist_entered_region",
+        "candidate_id": "cand_001",
+        "candidate_source": "wrist_entered_region",
+        "candidate_score": 0.72
+      }
+    ]
+  },
+  {
+    "data": {
+      "video": "/videos/clip_002.mp4",
+      "clip_id": "clip_002",
+      "fps": 30.0,
+      "active_start_s": 2.0,
+      "active_end_s": 15.0
+    },
+    "predictions": []
+  }
+]
