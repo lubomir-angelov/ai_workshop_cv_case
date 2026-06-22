@@ -8,22 +8,33 @@ the score-ranked greedy variant used for mAP. Both are order-invariant.
 Ignore handling: ``drop_ignored`` excludes any row with ANY positive temporal
 overlap with an ignore interval, applied consistently before every official metric.
 """
+
 from __future__ import annotations
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from .contracts import VALID_TYPES, MatchResult, type_name
-from .intervals import Criterion, overlaps
 
+from .contracts import VALID_TYPES, MatchResult, type_name
+from .intervals import overlaps
 
 
 def _canonical(items):
-    return sorted(items, key=lambda x: (x.clip_id, x.t_start, x.t_end, type_name(x.type),
-                                        getattr(x, "event_id", "") or getattr(x, "pred_id", "")))
+    return sorted(
+        items,
+        key=lambda x: (
+            x.clip_id,
+            x.t_start,
+            x.t_end,
+            type_name(x.type),
+            getattr(x, "event_id", "") or getattr(x, "pred_id", ""),
+        ),
+    )
 
 
 def match_one_to_one(gts, preds, criterion):
     """Maximum-cardinality accepted matching, tie-broken by quality. Order-invariant."""
-    gts = _canonical(list(gts)); preds = _canonical(list(preds))
+    gts = _canonical(list(gts))
+    preds = _canonical(list(preds))
     if not gts or not preds:
         return MatchResult([], list(gts), list(preds))
     # Cardinality-safe bonus: one extra accepted match must outweigh all quality
@@ -36,20 +47,33 @@ def match_one_to_one(gts, preds, criterion):
                 s[i, j] = accept_bonus + criterion.score(g, p)
     rows, cols = linear_sum_assignment(s, maximize=True)
     matched, ug, up = [], set(), set()
-    for i, j in zip(rows, cols):
+    for i, j in zip(rows, cols, strict=True):
         if criterion.accepts(gts[i], preds[j]):
-            matched.append((gts[i], preds[j])); ug.add(i); up.add(j)
-    return MatchResult(matched,
-                       [g for i, g in enumerate(gts) if i not in ug],
-                       [p for j, p in enumerate(preds) if j not in up])
+            matched.append((gts[i], preds[j]))
+            ug.add(i)
+            up.add(j)
+    return MatchResult(
+        matched,
+        [g for i, g in enumerate(gts) if i not in ug],
+        [p for j, p in enumerate(preds) if j not in up],
+    )
 
 
 def match_ranked(gts, preds, criterion):
     """Score-ranked greedy matching (mAP convention). Order-invariant."""
     gts = _canonical(list(gts))
-    preds = sorted(preds, key=lambda x: (-getattr(x, "score", 1.0), x.clip_id, x.t_start,
-                                         x.t_end, getattr(x, "pred_id", "")))
-    used = [False] * len(gts); matched, up = [], []
+    preds = sorted(
+        preds,
+        key=lambda x: (
+            -getattr(x, "score", 1.0),
+            x.clip_id,
+            x.t_start,
+            x.t_end,
+            getattr(x, "pred_id", ""),
+        ),
+    )
+    used = [False] * len(gts)
+    matched, up = [], []
     for p in preds:
         best, best_score = -1, -1.0
         for i, g in enumerate(gts):
@@ -59,7 +83,8 @@ def match_ranked(gts, preds, criterion):
             if sc > best_score:
                 best, best_score = i, sc
         if best >= 0:
-            used[best] = True; matched.append((gts[best], p))
+            used[best] = True
+            matched.append((gts[best], p))
         else:
             up.append(p)
     return MatchResult(matched, [g for i, g in enumerate(gts) if not used[i]], up)
@@ -85,13 +110,21 @@ def by_clip(items):
 
 def evaluate_class_aware(events, preds, criterion, ignores=(), matcher="hungarian"):
     """Match within each (clip, type) block; aggregate one MatchResult."""
+    if matcher not in _MATCHERS:
+        raise ValueError(f"unknown matcher {matcher!r}; expected one of {sorted(_MATCHERS)}")
     match_fn = _MATCHERS[matcher]
-    events = drop_ignored(events, ignores); preds = drop_ignored(preds, ignores)
+    events = drop_ignored(events, ignores)
+    preds = drop_ignored(preds, ignores)
     ge, gp = by_clip(events), by_clip(preds)
     agg = MatchResult()
     for clip in set(ge) | set(gp):
         for t in VALID_TYPES:
-            r = match_fn([e for e in ge.get(clip, []) if type_name(e.type) == t],
-                         [p for p in gp.get(clip, []) if type_name(p.type) == t], criterion)
-            agg.matched += r.matched; agg.unmatched_gt += r.unmatched_gt; agg.unmatched_pred += r.unmatched_pred
+            r = match_fn(
+                [e for e in ge.get(clip, []) if type_name(e.type) == t],
+                [p for p in gp.get(clip, []) if type_name(p.type) == t],
+                criterion,
+            )
+            agg.matched += r.matched
+            agg.unmatched_gt += r.unmatched_gt
+            agg.unmatched_pred += r.unmatched_pred
     return agg

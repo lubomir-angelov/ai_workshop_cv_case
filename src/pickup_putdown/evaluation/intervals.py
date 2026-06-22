@@ -1,5 +1,7 @@
 """Interval mathematics and the matching Criterion."""
+
 from __future__ import annotations
+
 from dataclasses import dataclass
 
 

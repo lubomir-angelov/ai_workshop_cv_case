@@ -4,24 +4,35 @@ Order-invariant: ground-truth rows are canonically sorted, clips iterated in
 sorted order, and the global ranking is sorted by (-score, t_start, t_end, id) so
 score ties break deterministically regardless of input row order.
 """
+
 from __future__ import annotations
+
 import numpy as np
+
+from .class_aware_matching import _canonical, by_clip, drop_ignored
 from .contracts import VALID_TYPES, type_name
 from .intervals import tiou
-from .class_aware_matching import _canonical, by_clip, drop_ignored
 
 
 def _scored_hits(events, preds, etype, tiou_thr, ignores):
     """Per type: list of (score, is_tp, t_start, t_end) over all clips + GT count."""
-    events = drop_ignored(events, ignores); preds = drop_ignored(preds, ignores)
+    events = drop_ignored(events, ignores)
+    preds = drop_ignored(preds, ignores)
     ge = by_clip([e for e in events if type_name(e.type) == etype])
     gp = by_clip([p for p in preds if type_name(p.type) == etype])
     n_gt = sum(len(v) for v in ge.values())
     scored = []
-    for clip in sorted(set(ge) | set(gp)):                       # deterministic clip order
-        gts = _canonical(list(ge.get(clip, [])))                 # canonical GT order
-        ps = sorted(gp.get(clip, []),
-                    key=lambda x: (-getattr(x, "score", 1.0), x.t_start, x.t_end, getattr(x, "pred_id", "")))
+    for clip in sorted(set(ge) | set(gp)):  # deterministic clip order
+        gts = _canonical(list(ge.get(clip, [])))  # canonical GT order
+        ps = sorted(
+            gp.get(clip, []),
+            key=lambda x: (
+                -getattr(x, "score", 1.0),
+                x.t_start,
+                x.t_end,
+                getattr(x, "pred_id", ""),
+            ),
+        )
         used = [False] * len(gts)
         for p in ps:
             best, best_ov = -1, tiou_thr
@@ -47,11 +58,14 @@ def average_precision(events, preds, etype, tiou_thr=0.5, ignores=()):
         return None
     if not scored:
         return 0.0
-    scored.sort(key=lambda x: (-x[0], x[2], x[3]))               # deterministic tie-break
-    tp = fp = 0; prec, rec = [], []
-    for score, is_tp, _ts, _te in scored:
-        tp += is_tp; fp += 1 - is_tp
-        prec.append(tp / (tp + fp)); rec.append(tp / n_gt)
+    scored.sort(key=lambda x: (-x[0], x[2], x[3]))  # deterministic tie-break
+    tp = fp = 0
+    prec, rec = [], []
+    for _score, is_tp, _ts, _te in scored:
+        tp += is_tp
+        fp += 1 - is_tp
+        prec.append(tp / (tp + fp))
+        rec.append(tp / n_gt)
     mrec = np.concatenate(([0.0], rec, [rec[-1]]))
     mpre = np.concatenate(([0.0], prec, [0.0]))
     for i in range(len(mpre) - 2, -1, -1):

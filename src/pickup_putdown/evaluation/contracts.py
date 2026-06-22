@@ -5,7 +5,9 @@ so they never shadow the canonical Task 1 Pydantic models. The evaluator is
 duck-typed: in the repo pass the canonical `pickup_putdown.common.schemas` models
 directly.
 """
+
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -87,8 +89,13 @@ class MatchResult:
     unmatched_pred: list = field(default_factory=list)
 
     @property
-    def tp(self): return len(self.matched)
+    def tp(self):
+        return len(self.matched)
+
     @property
-    def fp(self): return len(self.unmatched_pred)
+    def fp(self):
+        return len(self.unmatched_pred)
+
     @property
-    def fn(self): return len(self.unmatched_gt)
+    def fn(self):
+        return len(self.unmatched_gt)
