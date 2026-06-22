@@ -168,9 +168,7 @@ def probe_video(local_path: str | Path) -> ProbeResult:
     except subprocess.TimeoutExpired:
         return ProbeResult(
             decode_ok=False,
-            probe_error=(
-                f"ffprobe timed out after {FFPROBE_TIMEOUT_SECONDS} seconds"
-            ),
+            probe_error=(f"ffprobe timed out after {FFPROBE_TIMEOUT_SECONDS} seconds"),
         )
     except OSError as exc:
         return ProbeResult(
@@ -182,9 +180,7 @@ def probe_video(local_path: str | Path) -> ProbeResult:
         stderr = completed.stderr.strip() or "no error output"
         return ProbeResult(
             decode_ok=False,
-            probe_error=(
-                f"ffprobe returned code {completed.returncode}: {stderr}"
-            ),
+            probe_error=(f"ffprobe returned code {completed.returncode}: {stderr}"),
         )
 
     try:
@@ -209,18 +205,10 @@ def probe_video(local_path: str | Path) -> ProbeResult:
             _raw=data,
         )
 
-    streams = [
-        stream
-        for stream in raw_streams
-        if isinstance(stream, dict)
-    ]
+    streams = [stream for stream in raw_streams if isinstance(stream, dict)]
 
     video_stream = next(
-        (
-            stream
-            for stream in streams
-            if stream.get("codec_type") == "video"
-        ),
+        (stream for stream in streams if stream.get("codec_type") == "video"),
         None,
     )
 
@@ -256,11 +244,7 @@ def probe_video(local_path: str | Path) -> ProbeResult:
     probe_result.duration_s = duration
 
     audio_stream = next(
-        (
-            stream
-            for stream in streams
-            if stream.get("codec_type") == "audio"
-        ),
+        (stream for stream in streams if stream.get("codec_type") == "audio"),
         None,
     )
     if audio_stream is not None:
@@ -280,9 +264,7 @@ def probe_video(local_path: str | Path) -> ProbeResult:
         )
 
     duration_display = (
-        f"{probe_result.duration_s:.2f}"
-        if probe_result.duration_s is not None
-        else "?"
+        f"{probe_result.duration_s:.2f}" if probe_result.duration_s is not None else "?"
     )
 
     logger.debug(
@@ -309,9 +291,7 @@ def _validate_decode(
 
     if ffmpeg is None:
         result.decode_ok = False
-        result.probe_error = (
-            "ffmpeg not found on PATH or next to the ffprobe executable"
-        )
+        result.probe_error = "ffmpeg not found on PATH or next to the ffprobe executable"
         return result
 
     try:
@@ -340,10 +320,7 @@ def _validate_decode(
         )
     except subprocess.TimeoutExpired:
         result.decode_ok = False
-        result.probe_error = (
-            f"Decode validation timed out after "
-            f"{FFMPEG_TIMEOUT_SECONDS} seconds"
-        )
+        result.probe_error = f"Decode validation timed out after {FFMPEG_TIMEOUT_SECONDS} seconds"
         return result
     except OSError as exc:
         result.decode_ok = False
@@ -353,10 +330,7 @@ def _validate_decode(
     if completed.returncode != 0:
         stderr = completed.stderr.strip() or "no error output"
         result.decode_ok = False
-        result.probe_error = (
-            f"Decode validation failed with code "
-            f"{completed.returncode}: {stderr}"
-        )
+        result.probe_error = f"Decode validation failed with code {completed.returncode}: {stderr}"
         return result
 
     result.decode_ok = True

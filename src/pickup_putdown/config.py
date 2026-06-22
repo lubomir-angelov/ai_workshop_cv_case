@@ -47,7 +47,42 @@ class TriageConfig(BaseModel):
     tracker_config: str = "configs/bytetrack_triage.yaml"
 
 
+class PoseConfig(BaseModel):
+    """Configuration for YOLO pose inference on person-active spans."""
+
+    model_path: str = "models/pose_detector.pt"
+    target_fps: float = 8.0
+    image_size: int = 640
+    device: str = "auto"
+    half: bool = False
+    pose_confidence: float = 0.30
+    max_detections: int = 100
+    process_active_spans_only: bool = True
+
+
+class ActorAssociationConfig(BaseModel):
+    """Configuration for associating pose detections with actor tracks."""
+
+    min_actor_confidence: float = 0.30
+    match_iou_threshold: float = 0.15
+    max_gap_s: float = 0.5
+    allow_unmatched: bool = True
+
+
+class RegionMeasurementConfig(BaseModel):
+    """Configuration for region-based wrist measurements."""
+
+    expanded_margin_override: float | None = None
+    min_wrist_confidence: float = 0.30
+    min_dwell_duration_s: float = 0.25
+    velocity_window_frames: int = 5
+    reversal_threshold: float = 0.30
+    gap_tolerance_s: float = 0.5
+
+
 class ProposalsConfig(BaseModel):
+    """Configuration for raw interaction detection and candidate generation."""
+
     target_fps: float = 8
     minimum_wrist_confidence: float = 0.30
     minimum_interaction_duration_s: float = 0.25
@@ -55,13 +90,34 @@ class ProposalsConfig(BaseModel):
     context_before_s: float = 2.0
     context_after_s: float = 2.0
     maximum_candidate_duration_s: float = 10.0
+    trajectory_smoothing: bool = False
+    smoothing_window: int = 3
+
+
+class PreviewConfig(BaseModel):
+    """Configuration for candidate preview rendering."""
+
+    preview_fps: float = 4.0
+    max_output_width: int = 1280
+    max_output_height: int = 720
+    draw_actor_box: bool = True
+    draw_wrist_positions: bool = True
+    draw_region_polygons: bool = True
+    draw_region_labels: bool = True
+    draw_candidate_intervals: bool = True
+    text_scale: float = 0.5
+    line_thickness: int = 2
 
 
 class AppConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     triage: TriageConfig = Field(default_factory=TriageConfig)
     tracker: ByteTrackTriageConfig = Field(default_factory=ByteTrackTriageConfig)
+    pose: PoseConfig = Field(default_factory=PoseConfig)
+    actor_association: ActorAssociationConfig = Field(default_factory=ActorAssociationConfig)
+    region_measurements: RegionMeasurementConfig = Field(default_factory=RegionMeasurementConfig)
     proposals: ProposalsConfig = Field(default_factory=ProposalsConfig)
+    preview: PreviewConfig = Field(default_factory=PreviewConfig)
     data_dir: str = "data"
     output_dir: str = "outputs"
     cache_dir: str = "cache"
@@ -99,7 +155,11 @@ def _build_env_overrides() -> dict[str, Any]:
             "storage",
             "triage",
             "tracker",
+            "pose",
+            "actor_association",
+            "region_measurements",
             "proposals",
+            "preview",
             "data",
             "output",
             "cache",
