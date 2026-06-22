@@ -7,6 +7,10 @@ import os
 
 import pickup_putdown.evaluation as ev
 
+# tools/ sits one level under the repo root; resolve data files relative to it
+# so the self-check passes regardless of the current working directory.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def main():
     evt, pred, ign, crit = (
@@ -115,19 +119,26 @@ def main():
             "<s>",
         ),
     )
-    chk("acceptance config present", os.path.exists("configs/evaluation_acceptance.yaml"))
-    chk("sample output present", os.path.exists("samples/sample_metrics.json"))
+    chk(
+        "acceptance config present",
+        os.path.exists(os.path.join(ROOT, "configs", "evaluation_acceptance.yaml")),
+    )
+    chk(
+        "sample output present",
+        os.path.exists(os.path.join(ROOT, "samples", "sample_metrics.json")),
+    )
 
     def _file_contains(path, needle):
         try:
-            with open(path) as fh:
+            with open(path, encoding="utf-8") as fh:
                 return needle in fh.read()
         except OSError:
             return False
 
     chk(
         "scipy declared",
-        _file_contains("pyproject.toml", "scipy") or _file_contains("requirements.txt", "scipy"),
+        _file_contains(os.path.join(ROOT, "pyproject.toml"), "scipy")
+        or _file_contains(os.path.join(ROOT, "requirements.txt"), "scipy"),
     )
     print("\nALL CLEAR" if not fails else f"\n{len(fails)} FAILED: " + ", ".join(fails))
     return 1 if fails else 0

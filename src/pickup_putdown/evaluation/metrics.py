@@ -30,8 +30,9 @@ logger = logging.getLogger(__name__)
 
 
 def _multi_item_events(events: list[Any], overlap_thr: float | None = None) -> list[Any]:
-    """Events in a multi-item action. Default: shared group_id, else exact-duplicate
-    clip/type/start/end. ``overlap_thr`` enables transitive overlap clustering."""
+    """Events in a multi-item action. Default: shared group_id, else duplicate
+    clip/type with start/end rounded to 1e-6 (tolerant to float noise).
+    ``overlap_thr`` enables transitive overlap clustering."""
     out: list[Any] = []
     bucket: dict[tuple[str, str], list[Any]] = {}
     for e in events:

@@ -371,10 +371,10 @@ from enum import Enum as _Enum  # noqa: E402
 
 
 def test_slice_uses_configured_threshold():
-    # match holds only at tIoU 0.3, not 0.5; slice must honour the configured threshold
+    # slice must honour the configured tIoU threshold, not a hardcoded one
     gts = [Event("c", "pickup", 0.0, 2.0, "g1", confidence="low")]
     pr = [Prediction("c", "pickup", 0.0, 3.0, "p1")]  # tIoU = 2/3 -> matches at 0.3 and 0.5
-    # use tiou=0.6 so it should NOT match; overall and slice must agree (both 0 recall)
+    # tIoU = 2/3 < 0.8 -> no match at threshold 0.8; overall and slice agree (both recall 0)
     sl = slice_metrics(gts, pr, {"c": 100.0}, tiou_thresholds=(0.8,))
     assert sl["all"]["tiou@0.8"]["recall"] == 0.0
     assert sl["low_confidence"]["recall"] == 0.0
