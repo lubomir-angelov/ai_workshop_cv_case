@@ -421,10 +421,14 @@ def triage(
         clip_durations[clip_id] = duration_s
         clip_fps[clip_id] = fps
 
-        # Run person tracker
-        from pickup_putdown.perception.person_tracker import PersonTracker
+        # Run person tracker (pipelined for better GPU utilization)
+        from pickup_putdown.perception.pipelined_tracker import PipelinedPersonTracker
 
-        tracker = PersonTracker(video_path=vp, triage_cfg=triage_cfg)
+        tracker = PipelinedPersonTracker(
+            video_path=vp,
+            triage_cfg=triage_cfg,
+            use_pipeline=triage_cfg.pipeline_enabled,
+        )
         observations, summaries = tracker.run()
 
         obs_dicts = [o.model_dump() for o in observations]

@@ -221,3 +221,6 @@ annotation/export.json
 annotation/label_studio_data/
 annotation/*.csv
 annotation/*.parquet
+
+# Documentation (generated)
+PIPELINE_OPTIMIZATION.md
