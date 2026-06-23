@@ -35,6 +35,7 @@ class PersonTracker:
     app_cfg: AppConfig | None = None
 
     _model: object | None = field(default=None, repr=False)
+    _device: str = field(default="cpu", repr=False)
     _source_fps: float = field(default=0.0, repr=False)
     _total_frames: int = field(default=0, repr=False)
     _vid_stride: int = field(default=1, repr=False)
@@ -101,7 +102,9 @@ class PersonTracker:
 
         logger.info("Loading YOLO model from %s on %s", self.triage_cfg.model_path, device)
         model = YOLO(self.triage_cfg.model_path)
+        model.to(device)  # Explicitly move model to GPU
         self._model = model
+        self._device = device
         return model
 
     def run(self) -> tuple[list[PersonObservation], list[TrackSummary]]:
@@ -143,7 +146,8 @@ class PersonTracker:
                 classes=[0],  # person class
                 verbose=False,
                 imgsz=self.triage_cfg.image_size,
-                half=self.triage_cfg.half,
+                half=self.triage_cfg.half and self._device.startswith("cuda"),
+                device=self._device,
             )
 
             boxes = results[0].boxes
