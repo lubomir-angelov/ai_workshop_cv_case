@@ -46,6 +46,14 @@ class TriageConfig(BaseModel):
     sampling_seed: int = 42
     tracker_config: str = "configs/bytetrack_triage.yaml"
 
+    # Pipeline configuration for multiprocessed frame decoding
+    pipeline_enabled: bool = True
+    pipeline_queue_depth: int = 8
+    pipeline_n_decoders: int = 2
+    pipeline_resize_frames: bool = False  # Keep original resolution for identical results
+    pipeline_frame_size: tuple[int, int] = (640, 640)  # Only used if resize_frames=True
+    pipeline_frame_timeout_s: float = 30.0
+
 
 class PoseConfig(BaseModel):
     """Configuration for YOLO pose inference on person-active spans."""
