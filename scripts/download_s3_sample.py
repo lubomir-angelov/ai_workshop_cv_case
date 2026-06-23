@@ -90,6 +90,11 @@ def main() -> None:
         default=MIN_SIZE_MB,
         help=f"Minimum clip size in MB (default: {MIN_SIZE_MB}).",
     )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Download all .mp4 files regardless of size.",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging.")
     args = parser.parse_args()
 
@@ -114,16 +119,19 @@ def main() -> None:
                 size_bytes = obj["Size"]
                 size_mb = size_bytes / (1024 * 1024)
 
-                if key.lower().endswith(".mp4") and size_mb >= args.min_size_mb:
+                if key.lower().endswith(".mp4") and (
+                    args.all or size_mb >= args.min_size_mb
+                ):
                     clips.append((key, size_bytes))
     except (BotoCoreError, ClientError) as exc:
         raise SystemExit(f"Could not list S3 objects: {exc}") from exc
 
     clips.sort(key=lambda c: c[0])
-    print(f"Found {len(clips)} clips >= {args.min_size_mb} MB")
+    size_label = "all sizes" if args.all else f">= {args.min_size_mb} MB"
+    print(f"Found {len(clips)} clips ({size_label})")
 
     if not clips:
-        raise SystemExit("No matching clips found. Lower --min-size-mb.")
+        raise SystemExit("No matching clips found. Use --all or lower --min-size-mb.")
 
     already_downloaded = {
         p.name for p in OUT_DIR.rglob("*.mp4") if p.is_file() and not str(p).endswith(".part")
