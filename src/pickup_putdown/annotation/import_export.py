@@ -28,6 +28,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from pickup_putdown.annotation.schemas import (
     AnnotationEvent,
+    CandidateValidationError,
     CanonicalEvent,
     ConversionResult,
     EventLabel,
@@ -61,6 +62,10 @@ EVENTS_CSV_COLUMNS = [
 VALID_EVENT_TYPES = {"pickup", "putdown"}
 VALID_CONFIDENCE_VALUES = {"high", "med", "low"}
 VALID_REVIEW_STATUSES = {"draft", "reviewed", "accepted", "needs_adjudication"}
+
+# Tolerance in seconds for candidate-boundary checks during export.
+# Allows small floating-point or frame-boundary differences.
+CANDIDATE_BOUNDARY_TOLERANCE_S = 0.05
 
 # Boundary convention: [start_frame, end_frame), where end_frame is exclusive.
 
@@ -1059,6 +1064,535 @@ def build_label_studio_tasks(
         tasks.append(task)
 
     return tasks
+
+
+# ---------------------------------------------------------------------------
+# Candidate metadata validation and task building (Task 6.2)
+# ---------------------------------------------------------------------------
+
+
+def validate_candidate_metadata(
+    metadata: dict[str, Any],
+) -> list[CandidateValidationError]:
+    """Validate a single candidate metadata record.
+
+    Required fields: candidate_id, clip_id, source_start_s, source_end_s,
+    candidate_video (or candidate_key).
+
+    Returns a list of validation errors. Empty list means valid.
+    """
+    errors: list[CandidateValidationError] = []
+    cid = str(metadata.get("candidate_id", "")) or "unknown"
+
+    required_fields: list[str] = [
+        "candidate_id",
+        "clip_id",
+        "source_start_s",
+        "source_end_s",
+    ]
+    for field in required_fields:
+        value = metadata.get(field)
+        if value is None or (isinstance(value, str) and value.strip() == ""):
+            errors.append(
+                CandidateValidationError(
+                    candidate_id=cid,
+                    field_name=field,
+                    message=f"Required field {field!r} is missing or empty.",
+                )
+            )
+
+    # Video location: candidate_video or candidate_key
+    video = metadata.get("candidate_video") or metadata.get("candidate_key")
+    if not video or (isinstance(video, str) and video.strip() == ""):
+        errors.append(
+            CandidateValidationError(
+                candidate_id=cid,
+                field_name="candidate_video",
+                message="Required field candidate_video or candidate_key is missing or empty.",
+            )
+        )
+
+    # Validate source interval ordering
+    try:
+        start_s = float(metadata.get("source_start_s", 0))
+        end_s = float(metadata.get("source_end_s", 0))
+        if start_s >= end_s:
+            errors.append(
+                CandidateValidationError(
+                    candidate_id=cid,
+                    field_name="source_start_s",
+                    message=f"source_start_s ({start_s}) must be less than source_end_s ({end_s}).",
+                )
+            )
+    except (TypeError, ValueError):
+        errors.append(
+            CandidateValidationError(
+                candidate_id=cid,
+                field_name="source_start_s",
+                message="source_start_s and source_end_s must be numeric.",
+            )
+        )
+
+    return errors
+
+
+def build_candidate_tasks(
+    candidate_metadata: list[dict[str, Any]],
+) -> tuple[list[LabelStudioTask], list[CandidateValidationError]]:
+    """Build Label Studio tasks from Task 6.1 candidate metadata.
+
+    Each candidate becomes one Label Studio task. No default event label is
+    assigned — the annotator must choose the event type explicitly.
+
+    Args:
+        candidate_metadata: list of candidate metadata dicts as produced by
+            Task 6.1 (see CandidateMetadata schema).
+
+    Returns:
+        Tuple of (tasks, errors). Tasks for valid candidates are returned even
+        if some candidates produced errors.
+    """
+    tasks: list[LabelStudioTask] = []
+    all_errors: list[CandidateValidationError] = []
+
+    for candidate in candidate_metadata:
+        errors = validate_candidate_metadata(candidate)
+        if errors:
+            all_errors.extend(errors)
+            continue
+
+        cid = str(candidate["candidate_id"])
+        clip_id = str(candidate["clip_id"])
+        source_start_s = float(candidate["source_start_s"])
+        source_end_s = float(candidate["source_end_s"])
+        video = str(candidate.get("candidate_video") or candidate.get("candidate_key", ""))
+
+        duration_s = candidate.get("duration_s")
+        if duration_s is None:
+            duration_s = source_end_s - source_start_s
+        fps = candidate.get("fps")
+
+        data: dict[str, Any] = {
+            "video": video,
+            "candidate_id": cid,
+            "clip_id": clip_id,
+            "source_start_s": source_start_s,
+            "source_end_s": source_end_s,
+        }
+        # Optional metadata — included when present
+        if candidate.get("actor_id"):
+            data["actor_id"] = str(candidate["actor_id"])
+        if candidate.get("hand_side"):
+            data["hand_side"] = str(candidate["hand_side"])
+        if candidate.get("region_id"):
+            data["region_id"] = str(candidate["region_id"])
+        if candidate.get("proposal_score") is not None:
+            data["proposal_score"] = float(candidate["proposal_score"])
+        if candidate.get("config_fingerprint"):
+            data["config_fingerprint"] = str(candidate["config_fingerprint"])
+        if fps is not None:
+            data["fps"] = float(fps)
+        if duration_s is not None:
+            data["duration_s"] = float(duration_s)
+
+        task = LabelStudioTask(
+            data=data,
+            clip_id=clip_id,
+            fps=float(fps) if fps else 0.0,
+            duration_s=float(duration_s) if duration_s else 0.0,
+            video_path=video,
+        )
+        # No predictions — candidate is a possible interaction interval,
+        # not a classified event.
+        tasks.append(task)
+
+    # Deterministic ordering by candidate_id
+    tasks.sort(key=lambda t: t.data.get("candidate_id", ""))
+    return tasks, all_errors
+
+
+def _load_candidate_metadata_from_dir(
+    metadata_dir: str | Path,
+) -> list[dict[str, Any]]:
+    """Load candidate metadata from JSON files in a directory.
+
+    Supports:
+    - Individual JSON files (one candidate per file or array of candidates)
+    - A single metadata JSON with a "candidates" array (Task 6.1 format)
+
+    Returns all candidates in deterministic order.
+    """
+    dir_path = Path(metadata_dir)
+    if not dir_path.exists():
+        raise FileNotFoundError(f"Metadata directory not found: {dir_path}")
+
+    all_candidates: list[dict[str, Any]] = []
+
+    for json_file in sorted(dir_path.glob("*.json")):
+        content = json.loads(json_file.read_text())
+        if isinstance(content, list):
+            all_candidates.extend(content)
+        elif isinstance(content, dict):
+            # Task 6.1 format: {"candidates": [...], ...}
+            if "candidates" in content and isinstance(content["candidates"], list):
+                all_candidates.extend(content["candidates"])
+            else:
+                # Single candidate object
+                all_candidates.append(content)
+
+    return all_candidates
+
+
+# ---------------------------------------------------------------------------
+# Source-offset timestamp conversion (Task 6.2)
+# ---------------------------------------------------------------------------
+
+
+def _collect_source_offset(task_data: dict[str, Any]) -> float:
+    """Extract source_start_s offset from task data.
+
+    Returns 0.0 for legacy tasks without source offset information.
+    """
+    offset = task_data.get("source_start_s")
+    if offset is None:
+        return 0.0
+    try:
+        return float(offset)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _collect_candidate_id(task_data: dict[str, Any]) -> str | None:
+    """Extract candidate_id from task data, or None for legacy tasks."""
+    cid = task_data.get("candidate_id")
+    if cid and str(cid).strip():
+        return str(cid)
+    return None
+
+
+def _collect_candidate_metadata(task_data: dict[str, Any]) -> dict[str, str | None]:
+    """Extract optional candidate metadata fields for traceability."""
+    return {
+        "actor_id": str(task_data["actor_id"]) if task_data.get("actor_id") else None,
+        "hand_side": str(task_data["hand_side"]) if task_data.get("hand_side") else None,
+        "region_id": str(task_data["region_id"]) if task_data.get("region_id") else None,
+    }
+
+
+def _apply_source_offset(
+    relative_start: float,
+    relative_end: float,
+    source_offset: float,
+    source_start_s: float,
+    source_end_s: float | None,
+) -> tuple[float, float]:
+    """Convert candidate-relative timestamps to source-video timestamps."""
+    source_start = source_offset + relative_start
+    source_end = source_offset + relative_end
+    return source_start, source_end
+
+
+def _validate_candidate_relative_timestamps(
+    relative_start: float,
+    relative_end: float,
+    source_offset: float,
+    source_start_s: float,
+    source_end_s: float,
+    candidate_id: str,
+    region_id: str,
+    task_id: str,
+    annotation_id: str,
+    errors: ValidationErrors,
+) -> bool:
+    """Validate that relative timestamps produce valid source timestamps.
+
+    Returns True if valid, False otherwise. Adds errors for violations.
+    """
+    # Relative start must be non-negative
+    if relative_start < 0:
+        errors.add(
+            ValidationError(
+                task_id=task_id,
+                annotation_id=annotation_id,
+                region_id=region_id,
+                field_name="start_time",
+                message=(
+                    f"Candidate-relative start {relative_start}s is negative "
+                    f"(candidate={candidate_id})."
+                ),
+            )
+        )
+        return False
+
+    # Relative end must not exceed candidate duration (with tolerance)
+    candidate_duration = source_end_s - source_start_s
+    if relative_end > candidate_duration + CANDIDATE_BOUNDARY_TOLERANCE_S:
+        errors.add(
+            ValidationError(
+                task_id=task_id,
+                annotation_id=annotation_id,
+                region_id=region_id,
+                field_name="end_time",
+                message=(
+                    f"Candidate-relative end {relative_end}s exceeds candidate duration "
+                    f"{candidate_duration}s for candidate={candidate_id}."
+                ),
+            )
+        )
+        return False
+
+    # Compute source timestamps and validate they fall within source interval
+    source_start = source_offset + relative_start
+    source_end = source_offset + relative_end
+
+    if source_start < source_start_s - CANDIDATE_BOUNDARY_TOLERANCE_S:
+        errors.add(
+            ValidationError(
+                task_id=task_id,
+                annotation_id=annotation_id,
+                region_id=region_id,
+                field_name="start_time",
+                message=(
+                    f"Computed source start {source_start}s is before source interval "
+                    f"({source_start_s}s) for candidate={candidate_id}."
+                ),
+            )
+        )
+        return False
+
+    if source_end > source_end_s + CANDIDATE_BOUNDARY_TOLERANCE_S:
+        errors.add(
+            ValidationError(
+                task_id=task_id,
+                annotation_id=annotation_id,
+                region_id=region_id,
+                field_name="end_time",
+                message=(
+                    f"Computed source end {source_end}s is beyond source interval "
+                    f"({source_end_s}s) for candidate={candidate_id}."
+                ),
+            )
+        )
+        return False
+
+    # Event start must be before event end
+    if relative_end <= relative_start:
+        errors.add(
+            ValidationError(
+                task_id=task_id,
+                annotation_id=annotation_id,
+                region_id=region_id,
+                field_name="start_time/end_time",
+                message=(
+                    f"Event start ({relative_start}s) must be before event end "
+                    f"({relative_end}s) for candidate={candidate_id}."
+                ),
+            )
+        )
+        return False
+
+    return True
+
+
+def export_candidate_annotations(
+    export_json: dict[str, Any] | list[dict[str, Any]] | str,
+    events_output: str | Path | None = None,
+    ignore_output: str | Path | None = None,
+) -> ConversionResult:
+    """Export candidate-backed Label Studio annotations with source offset conversion.
+
+    Converts candidate-relative timestamps to original source-video timestamps
+    using the source_start_s offset embedded in each task's data.
+
+    For legacy tasks without source_start_s, preserves existing zero-offset
+    behavior (timestamps pass through unchanged).
+
+    Args:
+        export_json: Label Studio export JSON (same format as export_events_csv).
+        events_output: Optional path for canonical events.csv.
+        ignore_output: Optional path for ignore_intervals.parquet.
+
+    Returns:
+        ConversionResult with source-corrected canonical events and ignore intervals.
+    """
+    conversion = ConversionResult()
+    items = _load_export_json(export_json, conversion.validation)
+    if items is None:
+        return conversion
+
+    events: list[CanonicalEvent] = []
+    ignores: list[IgnoreIntervalExport] = []
+
+    for index, item in enumerate(items):
+        context = _task_context(item, index)
+        annotations = item.get("annotations")
+        if not isinstance(annotations, list):
+            conversion.validation.add(
+                ValidationError(
+                    task_id=context.task_id,
+                    field_name="annotations",
+                    message="Missing or invalid annotations array.",
+                )
+            )
+            continue
+
+        # Extract candidate source-mapping metadata
+        task_data = context.data
+        source_offset = _collect_source_offset(task_data)
+        candidate_id = _collect_candidate_id(task_data)
+        candidate_meta = _collect_candidate_metadata(task_data)
+
+        # Get source interval for validation
+        source_start_s: float | None = None
+        source_end_s: float | None = None
+        try:
+            raw_start = task_data.get("source_start_s")
+            raw_end = task_data.get("source_end_s")
+            if raw_start is not None:
+                source_start_s = float(raw_start)
+            if raw_end is not None:
+                source_end_s = float(raw_end)
+        except (TypeError, ValueError):
+            pass
+
+        # Validate source interval
+        if (
+            source_start_s is not None
+            and source_end_s is not None
+            and source_start_s >= source_end_s
+        ):
+            conversion.validation.add(
+                ValidationError(
+                    task_id=context.task_id,
+                    field_name="source_start_s",
+                    message=(
+                        f"source_start_s ({source_start_s}) >= source_end_s ({source_end_s}) "
+                        f"for candidate={candidate_id}."
+                    ),
+                )
+            )
+            continue
+
+        for annotation in annotations:
+            if not isinstance(annotation, dict):
+                conversion.validation.add(
+                    ValidationError(
+                        task_id=context.task_id,
+                        field_name="annotations",
+                        message="Each annotation must be a JSON object.",
+                    )
+                )
+                continue
+            if annotation.get("was_cancelled") is True:
+                continue
+
+            annotation_id = _annotation_id(annotation)
+            confirmed = _annotation_review_confirmed(annotation, context)
+            if not confirmed:
+                conversion.validation.add(
+                    ValidationError(
+                        task_id=context.task_id,
+                        annotation_id=annotation_id,
+                        field_name="complete_active_span_reviewed",
+                        message="Export requires complete_active_span_reviewed=true.",
+                    )
+                )
+
+            bundles = _collect_region_bundles(
+                annotation,
+                context,
+                conversion.validation,
+            )
+            for bundle in bundles:
+                region = _parse_annotation_region(
+                    bundle,
+                    context,
+                    annotation,
+                    conversion.validation,
+                )
+                if region is None or not confirmed:
+                    continue
+
+                # Apply source offset conversion for candidate-backed tasks
+                if region.start_time is not None and source_offset > 0:
+                    if source_start_s is not None and source_end_s is not None:
+                        valid = _validate_candidate_relative_timestamps(
+                            region.start_time,
+                            region.end_time,
+                            source_offset,
+                            source_start_s,
+                            source_end_s,
+                            candidate_id or "unknown",
+                            region.region_id,
+                            context.task_id,
+                            annotation_id,
+                            conversion.validation,
+                        )
+                        if not valid:
+                            continue
+
+                    region.start_time = source_offset + region.start_time
+                    region.end_time = source_offset + region.end_time
+
+                if region.label is EventLabel.IGNORE:
+                    reason = _ignore_reason(
+                        bundle,
+                        context,
+                        annotation,
+                        conversion.validation,
+                    )
+                    if reason is None:
+                        continue
+                    ignores.append(
+                        IgnoreIntervalExport(
+                            ignore_id=_generate_ignore_id(
+                                context.clip_id,
+                                region.region_id,
+                            ),
+                            clip_id=context.clip_id,
+                            t_start=region.start_time,
+                            t_end=region.end_time,
+                            reason=reason,
+                            annotator=region.annotator or None,
+                            notes=region.notes,
+                            candidate_id=candidate_id,
+                        )
+                    )
+                    continue
+
+                if region.label not in {EventLabel.PICKUP, EventLabel.PUTDOWN}:
+                    conversion.validation.add(
+                        ValidationError(
+                            task_id=context.task_id,
+                            annotation_id=annotation_id,
+                            region_id=region.region_id,
+                            field_name="labels",
+                            message=f"Unsupported official event label: {region.label!s}.",
+                        )
+                    )
+                    continue
+
+                group_id = _generate_group_id(context.clip_id, region.region_id)
+                canonical_events = _annotation_to_canonical_events(region, group_id)
+                # Enrich with candidate traceability metadata
+                for evt in canonical_events:
+                    evt.candidate_id = candidate_id
+                    evt.actor_id = candidate_meta.get("actor_id")
+                    evt.hand_side = candidate_meta.get("hand_side")
+                    evt.region_id = candidate_meta.get("region_id")
+                events.extend(canonical_events)
+
+    events.sort(key=lambda event: (event.clip_id, event.t_start, str(event.type), event.event_id))
+    ignores.sort(key=lambda interval: (interval.clip_id, interval.t_start, interval.ignore_id))
+    conversion.canonical_events = events
+    conversion.ignore_intervals = ignores
+
+    if events_output is not None:
+        _write_events_csv(conversion.canonical_events, Path(events_output))
+    if ignore_output is not None:
+        _write_ignore_parquet(conversion.ignore_intervals, Path(ignore_output))
+
+    return conversion
 
 
 # ---------------------------------------------------------------------------

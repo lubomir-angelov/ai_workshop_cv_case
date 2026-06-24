@@ -186,6 +186,12 @@ class CanonicalEvent(BaseModel):
     confidence: ConfidenceLevel = ConfidenceLevel.HIGH
     notes: str | None = None
     event_group_id: str = ""
+    # Traceability to originating candidate (Task 6.2)
+    candidate_id: str | None = None
+    # Optional metadata preserved from candidate task
+    actor_id: str | None = None
+    hand_side: str | None = None
+    region_id: str | None = None
 
     @field_validator("t_start", "t_end")
     @classmethod
@@ -218,6 +224,8 @@ class IgnoreIntervalExport(BaseModel):
     reason: IgnoreReason
     annotator: str | None = None
     notes: str | None = None
+    # Traceability to originating candidate (Task 6.2)
+    candidate_id: str | None = None
 
     @field_validator("t_start", "t_end")
     @classmethod
@@ -232,6 +240,58 @@ class IgnoreIntervalExport(BaseModel):
         start = info.data.get("t_start")
         if start is not None and v <= start:
             raise ValueError("t_end must be greater than t_start")
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Candidate metadata (Task 6.1 → 6.2 bridge)
+# ---------------------------------------------------------------------------
+
+
+class CandidateMetadata(BaseModel):
+    """Metadata for a single candidate clip produced by Task 6.1.
+
+    Required fields:
+        candidate_id: unique candidate identifier
+        clip_id: original source video identifier
+        source_start_s: candidate window start in source-video seconds
+        source_end_s: candidate window end in source-video seconds
+        candidate_video: S3 key, URL, or local path accessible to Label Studio
+
+    Optional fields (preserved but not required):
+        actor_id, hand_side, region_id, proposal_score, config_fingerprint,
+        duration_s, fps, codec, pixel_format
+    """
+
+    candidate_id: str
+    clip_id: str
+    source_start_s: float
+    source_end_s: float
+    candidate_video: str
+    actor_id: str | None = None
+    hand_side: str | None = None
+    region_id: str | None = None
+    proposal_score: float | None = None
+    config_fingerprint: str | None = None
+    duration_s: float | None = None
+    fps: float | None = None
+    codec: str | None = None
+    pixel_format: str | None = None
+    candidate_key: str | None = None
+
+    @field_validator("source_start_s", "source_end_s")
+    @classmethod
+    def non_negative_timestamp(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("timestamp must be non-negative")
+        return v
+
+    @field_validator("source_end_s")
+    @classmethod
+    def source_end_after_start(cls, v: float, info) -> float:
+        start = info.data.get("source_start_s")
+        if start is not None and v <= start:
+            raise ValueError("source_end_s must be greater than source_start_s")
         return v
 
 
@@ -297,6 +357,14 @@ class ValidationError(BaseModel):
     annotation_id: str = ""
     region_id: str = ""
     field_name: str = ""
+    message: str
+
+
+class CandidateValidationError(BaseModel):
+    """Validation error for candidate metadata."""
+
+    candidate_id: str
+    field_name: str
     message: str
 
 

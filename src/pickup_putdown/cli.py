@@ -1289,15 +1289,24 @@ def propose(
 
 @app.command()
 def annotation_build_tasks(
-    clips_path: str = typer.Argument(
-        ...,
-        help="Path to clips JSON file.",
+    clips_path: str | None = typer.Option(
+        None,
+        "--clips",
+        help="Path to clips JSON file (for legacy clip-based tasks).",
     ),
     candidates_path: str | None = typer.Option(
         None,
         "--candidates",
         "-c",
-        help="Path to candidates JSON file (optional).",
+        help="Path to candidates JSON file (optional, for legacy mode).",
+    ),
+    candidate_metadata_dir: str | None = typer.Option(
+        None,
+        "--candidate-metadata-dir",
+        help=(
+            "Directory containing candidate metadata JSON files from Task 6.1. "
+            "When provided, builds candidate-backed tasks instead of clip-based tasks."
+        ),
     ),
     output_path: str = typer.Option(
         "annotation/tasks.json",
@@ -1312,31 +1321,69 @@ def annotation_build_tasks(
         help="Enable debug logging.",
     ),
 ) -> None:
-    """Build Label Studio tasks from clip metadata and candidate predictions.
+    """Build Label Studio tasks from clip metadata or candidate metadata.
 
-    Candidates are placed in the prediction (pre-annotation) structure,
-    never in the completed annotation structure.
+    Legacy mode (--clips): Build tasks from clip metadata with optional
+    candidate predictions.
+
+    Candidate mode (--candidate-metadata-dir): Build tasks from Task 6.1
+    candidate metadata. Each candidate becomes one task with source offset
+    information for timestamp conversion during export. No default event
+    label is assigned.
     """
     _setup_logging(verbose)
 
     import json
     from pathlib import Path
 
-    from pickup_putdown.annotation.import_export import (
-        build_label_studio_tasks,
-    )
+    if candidate_metadata_dir:
+        from pickup_putdown.annotation.import_export import (
+            build_candidate_tasks,
+        )
 
-    clips = json.loads(Path(clips_path).read_text())
-    candidates = None
-    if candidates_path:
-        candidates = json.loads(Path(candidates_path).read_text())
+        candidate_metadata = json.loads(Path(candidate_metadata_dir).read_text())
+        if isinstance(candidate_metadata, dict) and "candidates" in candidate_metadata:
+            candidate_metadata = candidate_metadata["candidates"]
+        elif not isinstance(candidate_metadata, list):
+            candidate_metadata = [candidate_metadata]
 
-    tasks = build_label_studio_tasks(clips, candidates)
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(output_path).write_text(
-        json.dumps([t.model_dump() for t in tasks], indent=2, default=str)
-    )
-    typer.echo(f"Wrote {len(tasks)} task(s) to {output_path}")
+        tasks, errors = build_candidate_tasks(candidate_metadata)
+
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text(
+            json.dumps([t.model_dump() for t in tasks], indent=2, default=str)
+        )
+        typer.echo(f"Wrote {len(tasks)} task(s) to {output_path}")
+        if errors:
+            typer.echo(f"Rejected {len(errors)} candidate(s) due to validation errors:", err=True)
+            for err in errors:
+                typer.echo(
+                    f"  [{err.candidate_id}/{err.field_name}] {err.message}",
+                    err=True,
+                )
+            raise SystemExit(1)
+    elif clips_path:
+        from pickup_putdown.annotation.import_export import (
+            build_label_studio_tasks,
+        )
+
+        clips = json.loads(Path(clips_path).read_text())
+        candidates = None
+        if candidates_path:
+            candidates = json.loads(Path(candidates_path).read_text())
+
+        tasks = build_label_studio_tasks(clips, candidates)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text(
+            json.dumps([t.model_dump() for t in tasks], indent=2, default=str)
+        )
+        typer.echo(f"Wrote {len(tasks)} task(s) to {output_path}")
+    else:
+        typer.echo(
+            "Error: provide either --clips or --candidate-metadata-dir.",
+            err=True,
+        )
+        raise SystemExit(1)
 
 
 @app.command()
@@ -1357,6 +1404,14 @@ def annotation_export(
         "-i",
         help="Output path for ignore_intervals.parquet.",
     ),
+    candidate_mode: bool = typer.Option(
+        False,
+        "--candidate-mode",
+        help=(
+            "Enable candidate-backed export mode. Converts candidate-relative "
+            "timestamps to source-video timestamps using source_start_s offset."
+        ),
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -1369,27 +1424,50 @@ def annotation_export(
     Only accepted visible pickup/putdown events with
     complete_active_span_reviewed=true are exported to events.csv.
     Ignore intervals are exported to ignore_intervals.parquet.
+
+    In --candidate-mode, timestamps are converted from candidate-relative
+    to source-video timestamps using the source_start_s offset stored in
+    each task's data. Legacy tasks without source offset pass through
+    unchanged.
     """
     _setup_logging(verbose)
 
     import json
     from pathlib import Path
 
-    from pickup_putdown.annotation.import_export import (
-        export_events_csv,
-        export_ignore_intervals_parquet,
-    )
-
     export_data = json.loads(Path(input_path).read_text())
 
-    events_result = export_events_csv(export_data, events_output)
-    typer.echo(f"Events: {len(events_result.canonical_events)} rows ({events_output})")
-    if not events_result.is_valid:
-        for err in events_result.validation.errors:
-            typer.echo(f"  WARN: {err.message}", err=True)
+    if candidate_mode:
+        from pickup_putdown.annotation.import_export import (
+            export_candidate_annotations,
+        )
 
-    ignore_result = export_ignore_intervals_parquet(export_data, ignore_output)
-    typer.echo(f"Ignore intervals: {len(ignore_result.ignore_intervals)} rows ({ignore_output})")
+        result = export_candidate_annotations(
+            export_data,
+            events_output=events_output,
+            ignore_output=ignore_output,
+        )
+        typer.echo(f"Events: {len(result.canonical_events)} rows ({events_output})")
+        typer.echo(f"Ignore intervals: {len(result.ignore_intervals)} rows ({ignore_output})")
+        if not result.is_valid:
+            for err in result.validation.errors:
+                typer.echo(f"  WARN: {err.message}", err=True)
+    else:
+        from pickup_putdown.annotation.import_export import (
+            export_events_csv,
+            export_ignore_intervals_parquet,
+        )
+
+        events_result = export_events_csv(export_data, events_output)
+        typer.echo(f"Events: {len(events_result.canonical_events)} rows ({events_output})")
+        if not events_result.is_valid:
+            for err in events_result.validation.errors:
+                typer.echo(f"  WARN: {err.message}", err=True)
+
+        ignore_result = export_ignore_intervals_parquet(export_data, ignore_output)
+        typer.echo(
+            f"Ignore intervals: {len(ignore_result.ignore_intervals)} rows ({ignore_output})"
+        )
 
 
 @app.command()
