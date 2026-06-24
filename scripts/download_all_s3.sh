@@ -22,7 +22,7 @@ while true; do
 
         output=""
         exit_code=0
-        output=$(python scripts/download_s3_sample.py --count "$COUNT" --offset "$OFFSET" 2>&1) || exit_code=$?
+        output=$(python scripts/download_s3_sample.py --count "$COUNT" --offset "$OFFSET" --all 2>&1) || exit_code=$?
 
         echo "$output" >> "$LOG_FILE"
 

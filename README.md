@@ -372,7 +372,7 @@ make candidates-process-local CANDIDATE_TARGET_COUNT=10
 make candidates-upload CANDIDATE_TARGET_COUNT=0
 ```
 
-The script downloads deterministically (sorted by key), excludes already-downloaded files, and updates the local ledger after each download. Use `--min-size-mb` to adjust the minimum clip size threshold.
+The script downloads deterministically (sorted by key), excludes already-downloaded files, and updates the local ledger after each download. Use `--min-size-mb` to adjust the minimum clip size threshold, or `--all` to download all `.mp4` files regardless of size.
 
 ### Ledger states
 
