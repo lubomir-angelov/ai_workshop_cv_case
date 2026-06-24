@@ -127,6 +127,16 @@ class _RegionBundle:
     origin: str
 
 
+@dataclass
+class MetadataLoadStats:
+    """Statistics from loading candidate metadata from a directory."""
+
+    source_files_scanned: int = 0
+    zero_candidate_sources_skipped: int = 0
+    candidates_loaded: int = 0
+    errors: list[str] | tuple[str, ...] = ()
+
+
 # ---------------------------------------------------------------------------
 # Generic helpers
 # ---------------------------------------------------------------------------
@@ -1317,34 +1327,176 @@ def build_candidate_tasks(
 
 def _load_candidate_metadata_from_dir(
     metadata_dir: str | Path,
-) -> list[dict[str, Any]]:
-    """Load candidate metadata from JSON files in a directory.
+) -> tuple[list[dict[str, Any]], MetadataLoadStats]:
+    """Load candidate metadata from JSON files in a directory (recursive).
 
-    Supports:
-    - Individual JSON files (one candidate per file or array of candidates)
-    - A single metadata JSON with a "candidates" array (Task 6.1 format)
+    Supports two formats detected explicitly from JSON structure:
 
-    Returns all candidates in deterministic order.
+    1. Source-level Task 6.1 metadata (has ``.candidates[]`` key):
+       One JSON file per source video. Each nested candidate inherits
+       ``source_video_id`` as ``clip_id``, plus ``source_bucket`` and
+       ``source_key`` from the parent. Source files with zero candidates
+       are skipped silently.
+
+    2. Flat candidate metadata (no ``.candidates`` key or is a JSON array):
+       One candidate per file, or a JSON array of candidates.
+
+    Returns:
+        Tuple of (candidates list, load stats). Candidates are sorted
+        deterministically by source file path then candidate index.
     """
     dir_path = Path(metadata_dir)
     if not dir_path.exists():
         raise FileNotFoundError(f"Metadata directory not found: {dir_path}")
 
     all_candidates: list[dict[str, Any]] = []
+    stats = MetadataLoadStats()
+    errors: list[str] = []
 
-    for json_file in sorted(dir_path.glob("*.json")):
-        content = json.loads(json_file.read_text())
+    json_files = sorted(dir_path.rglob("*.json"))
+    stats.source_files_scanned = len(json_files)
+
+    seen_candidate_ids: set[str] = set()
+
+    for json_file in json_files:
+        try:
+            content = json.loads(json_file.read_text())
+        except json.JSONDecodeError as exc:
+            errors.append(f"Malformed JSON in {json_file}: {exc}")
+            continue
+
         if isinstance(content, list):
-            all_candidates.extend(content)
-        elif isinstance(content, dict):
-            # Task 6.1 format: {"candidates": [...], ...}
-            if "candidates" in content and isinstance(content["candidates"], list):
-                all_candidates.extend(content["candidates"])
-            else:
-                # Single candidate object
-                all_candidates.append(content)
+            # Flat array of candidate objects
+            for item in content:
+                if isinstance(item, dict):
+                    all_candidates.append(item)
+            continue
 
-    return all_candidates
+        if not isinstance(content, dict):
+            errors.append(f"Unexpected content type in {json_file}: {type(content).__name__}")
+            continue
+
+        # Detect source-level Task 6.1 format vs flat candidate object
+        if "candidates" in content:
+            nested = content["candidates"]
+            if not isinstance(nested, list):
+                source_id = content.get("source_video_id", str(json_file))
+                errors.append(
+                    f"Source file {json_file}: 'candidates' must be a list, "
+                    f"got {type(nested).__name__} (source_video_id={source_id})"
+                )
+                continue
+
+            # Zero-candidate source: skip silently
+            if len(nested) == 0:
+                stats.zero_candidate_sources_skipped += 1
+                continue
+
+            source_video_id = content.get("source_video_id")
+            source_bucket = content.get("source_bucket")
+            source_key = content.get("source_key")
+
+            # Validate source_video_id when candidates are present
+            if not source_video_id:
+                errors.append(
+                    f"Source file {json_file} has candidates but is missing 'source_video_id'."
+                )
+                continue
+
+            for idx, cand in enumerate(nested):
+                if not isinstance(cand, dict):
+                    errors.append(
+                        f"Source file {json_file} candidate[{idx}] is not a JSON object."
+                    )
+                    continue
+
+                # Validate nested candidate_id
+                cand_id = cand.get("candidate_id")
+                if not cand_id:
+                    errors.append(
+                        f"Source file {json_file} candidate[{idx}] is missing "
+                        f"'candidate_id' (source_video_id={source_video_id})."
+                    )
+                    continue
+
+                # Validate nested candidate_key
+                cand_key = cand.get("candidate_key")
+                if not cand_key:
+                    errors.append(
+                        f"Source file {json_file} candidate[{cand_id}] is missing "
+                        f"'candidate_key' (source_video_id={source_video_id})."
+                    )
+                    continue
+
+                # Validate timing fields
+                start_s = cand.get("source_start_s")
+                end_s = cand.get("source_end_s")
+                timing_ok = True
+                if start_s is None:
+                    errors.append(
+                        f"Source file {json_file} candidate[{cand_id}] is missing "
+                        f"'source_start_s' (source_video_id={source_video_id})."
+                    )
+                    timing_ok = False
+                if end_s is None:
+                    errors.append(
+                        f"Source file {json_file} candidate[{cand_id}] is missing "
+                        f"'source_end_s' (source_video_id={source_video_id})."
+                    )
+                    timing_ok = False
+                if timing_ok:
+                    try:
+                        s = float(start_s)
+                        e = float(end_s)
+                        if s < 0 or e < 0:
+                            errors.append(
+                                f"Source file {json_file} candidate[{cand_id}] has "
+                                f"negative timing (source_start_s={s}, source_end_s={e}) "
+                                f"(source_video_id={source_video_id})."
+                            )
+                            timing_ok = False
+                        elif s >= e:
+                            errors.append(
+                                f"Source file {json_file} candidate[{cand_id}] has "
+                                f"invalid interval source_start_s={s} >= source_end_s={e} "
+                                f"(source_video_id={source_video_id})."
+                            )
+                            timing_ok = False
+                    except (TypeError, ValueError) as exc:
+                        errors.append(
+                            f"Source file {json_file} candidate[{cand_id}] has "
+                            f"non-numeric timing fields: {exc} "
+                            f"(source_video_id={source_video_id})."
+                        )
+                        timing_ok = False
+
+                if not timing_ok:
+                    continue
+
+                # Duplicate candidate ID check
+                if cand_id in seen_candidate_ids:
+                    errors.append(
+                        f"Duplicate candidate_id '{cand_id}' in {json_file} "
+                        f"(source_video_id={source_video_id})."
+                    )
+                    continue
+                seen_candidate_ids.add(cand_id)
+
+                # Build enriched candidate record
+                enriched = dict(cand)
+                enriched.setdefault("clip_id", str(source_video_id))
+                if source_bucket:
+                    enriched.setdefault("source_bucket", source_bucket)
+                if source_key:
+                    enriched.setdefault("source_key", source_key)
+                all_candidates.append(enriched)
+        else:
+            # Flat candidate object (backward compatibility)
+            all_candidates.append(content)
+
+    stats.candidates_loaded = len(all_candidates)
+    stats.errors = tuple(errors)
+    return all_candidates, stats
 
 
 # ---------------------------------------------------------------------------

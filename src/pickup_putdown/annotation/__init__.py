@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pickup_putdown.annotation.import_export import (
+    MetadataLoadStats,
     build_candidate_tasks,
     build_label_studio_tasks,
     check_media_references,
@@ -43,6 +44,7 @@ __all__ = [
     "IgnoreIntervalExport",
     "LabelStudioTask",
     "LabelStudioPrediction",
+    "MetadataLoadStats",
     "MediaCheckReport",
     "MediaCheckResult",
     "ReviewMetadata",

@@ -1376,27 +1376,65 @@ def annotation_build_tasks(
 
     if candidate_metadata_dir:
         from pickup_putdown.annotation.import_export import (
+            _load_candidate_metadata_from_dir,
             build_candidate_tasks,
             select_candidate_pilot,
         )
 
         # Load metadata
         metadata_path = Path(candidate_metadata_dir)
+        load_stats = None
         if metadata_path.is_file():
             candidate_metadata = json.loads(metadata_path.read_text())
             if isinstance(candidate_metadata, dict) and "candidates" in candidate_metadata:
-                candidate_metadata = candidate_metadata["candidates"]
-            elif not isinstance(candidate_metadata, list):
+                source_meta = candidate_metadata
+                nested = source_meta.get("candidates", [])
+                if not isinstance(nested, list):
+                    typer.echo(
+                        f"Error: 'candidates' in {metadata_path} must be a list.",
+                        err=True,
+                    )
+                    raise SystemExit(1)
+                source_video_id = source_meta.get("source_video_id")
+                source_bucket = source_meta.get("source_bucket")
+                source_key = source_meta.get("source_key")
+                candidate_metadata = []
+                for cand in nested:
+                    if not isinstance(cand, dict):
+                        continue
+                    enriched = dict(cand)
+                    if source_video_id:
+                        enriched.setdefault("clip_id", str(source_video_id))
+                    if source_bucket:
+                        enriched.setdefault("source_bucket", source_bucket)
+                    if source_key:
+                        enriched.setdefault("source_key", source_key)
+                    candidate_metadata.append(enriched)
+            elif isinstance(candidate_metadata, list):
+                pass
+            else:
                 candidate_metadata = [candidate_metadata]
         elif metadata_path.is_dir():
-            from pickup_putdown.annotation.import_export import (
-                _load_candidate_metadata_from_dir,
-            )
-
-            candidate_metadata = _load_candidate_metadata_from_dir(metadata_path)
+            candidate_metadata, load_stats = _load_candidate_metadata_from_dir(metadata_path)
+            # Report load errors immediately
+            if load_stats.errors:
+                typer.echo("Metadata load errors:", err=True)
+                for err_msg in load_stats.errors:
+                    typer.echo(f"  ERROR: {err_msg}", err=True)
+                raise SystemExit(1)
         else:
             typer.echo(f"Metadata path not found: {metadata_path}", err=True)
             raise SystemExit(1)
+
+        # Report load stats
+        if load_stats:
+            typer.echo(f"Scanned {load_stats.source_files_scanned} source metadata file(s).")
+            if load_stats.zero_candidate_sources_skipped:
+                typer.echo(
+                    f"Skipped {load_stats.zero_candidate_sources_skipped} "
+                    f"source(s) with zero candidates."
+                )
+            typer.echo(f"Loaded {load_stats.candidates_loaded} candidate(s).")
 
         # Pilot selection
         if limit is not None:
@@ -1439,7 +1477,7 @@ def annotation_build_tasks(
         Path(output_path).write_text(
             json.dumps([t.model_dump() for t in tasks], indent=2, default=str)
         )
-        typer.echo(f"Wrote {len(tasks)} task(s) to {output_path}")
+        typer.echo(f"Generated {len(tasks)} task(s) -> {output_path}")
         if errors:
             typer.echo(f"Rejected {len(errors)} candidate(s) due to validation errors:", err=True)
             for err in errors:
