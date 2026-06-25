@@ -640,6 +640,7 @@ def call_vlm(
 def vlm_result_to_annotations(
     vlm_response: dict[str, Any],
     fps: float,
+    duration_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """Convert frame-based VLM events to time-based annotations.
 
@@ -681,6 +682,16 @@ def vlm_result_to_annotations(
 
         start_s = start_frame / fps
         end_s = (end_frame + 1) / fps
+        
+        if duration_s is not None:
+            start_s = min(start_s, duration_s)
+            end_s = min(end_s, duration_s)
+        
+        if end_s <= start_s:
+            raise VlmClientError(
+                f"Invalid event interval after clamping: "
+                f"start_s={start_s}, end_s={end_s}"
+            )
 
         confidence_str = str(
             event.get("confidence", "med")

@@ -446,7 +446,11 @@ def analyze_candidate_frames(
     reasoning = str(vlm_response.get("reasoning") or "").strip()
 
     try:
-        annotations = vlm_result_to_annotations(vlm_response, fps)
+        annotations = vlm_result_to_annotations(
+            vlm_response,
+            fps,
+            duration_s=candidate_duration_s,
+        )
         events = [VlMEventAnnotation(**annotation) for annotation in annotations]
     except (VlmClientError, ValidationError, TypeError, ValueError) as exc:
         result.review_status = "failed"
