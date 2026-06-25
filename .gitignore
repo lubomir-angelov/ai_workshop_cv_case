@@ -214,6 +214,9 @@ artifacts/
 **.backup
 .local/
 models/
+*.pt
+*.pth
+*.ckpt
 
 # Annotation artifacts (generated per-session)
 annotation/tasks.json
