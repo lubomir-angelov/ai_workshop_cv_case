@@ -1,84 +1,98 @@
 # VLM Annotation Pipeline
 
-Run the annotate-vlm command to send candidate contact sheets to a local llama.cpp VLM and produce structured event annotations.
+Runs candidate contact sheets through the local llama.cpp vision model and writes structured pickup/putdown annotations.
 
 ## Prerequisites
 
-- llama.cpp server running with a **vision-capable** model and mmproj loaded
-- Default endpoint: `http://localhost:8000`
-- Verify vision support:
-  ```bash
-  curl -s http://localhost:8000/v1/models
-  ```
+- llama.cpp is running at `http://localhost:8000`
+- `Qwen3.6-27B-UD-Q4_K_XL` is loaded with `mmproj-BF16.gguf`
+- The project environment is activated
 
-## Quick run
+Verify vision support:
 
 ```bash
-pickup-putdown annotate-vlm .local/candidate_staging/candidates \
-  --output-dir .local/vlm_annotations \
-  --force \
-  --vlm-base-url http://localhost:8000 \
-  --vlm-model Qwen3.6-27B-UD-Q4_K_XL \
-  -v
+MODEL_ID="Qwen3.6-27B-UD-Q4_K_XL"
+
+curl -sG   --data-urlencode "model=${MODEL_ID}"   http://localhost:8000/props |
+jq '.modalities'
 ```
 
-## Run all night with tmux + logging
+Expected:
+
+```json
+{
+  "vision": true,
+  "audio": false
+}
+```
+
+## Quick test
+
+Run a small batch before the full job:
 
 ```bash
-# Start detached session
-tmux new-session -d -s vlm-annotate
-
-# Run pipeline, tee output to timestamped log
-tmux send-keys -t vlm-annotate \
-  'pickup-putdown annotate-vlm .local/candidate_staging/candidates \
-    --output-dir .local/vlm_annotations \
-    --force \
-    --vlm-base-url http://localhost:8000 \
-    --vlm-model Qwen3.6-27B-UD-Q4_K_XL \
-    --vlm-timeout 180 \
-    -v 2>&1 | tee .local/vlm_annotations/vlm_run_$(date +%Y%m%d_%H%M%S).log' \
-  Enter
-
-# Attach to watch
-tmux attach-session -t vlm-annotate
+pickup-putdown annotate-vlm   .local/candidate_staging/candidates   --output-dir .local/vlm_annotations   --force   --vlm-base-url http://localhost:8000   --vlm-model Qwen3.6-27B-UD-Q4_K_XL   --vlm-timeout 180   --limit 2   -v
 ```
 
-Detach with `Ctrl-b d`. Reattach with `tmux attach -t vlm-annotate`.
+## Unattended tmux run
 
-## Options
+Create the output directory and start a detached session:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--output-dir, -o` | `.local/vlm_annotations` | Output directory |
-| `--review-fps` | `5.0` | Frame extraction rate |
-| `--max-frame-width` | `640` | Review frame max width |
-| `--force` | — | Reprocess already-annotated candidates |
-| `--limit N` | all | Process at most N candidates |
-| `--vlm-base-url` | `http://localhost:8080` | llama.cpp server URL |
-| `--vlm-model` | auto | Model name for VLM |
-| `--vlm-temperature` | `0.0` | Sampling temperature |
-| `--vlm-max-tokens` | `2048` | Max response tokens |
-| `--vlm-timeout` | `120` | Per-request timeout (seconds) |
-| `--no-vlm` | — | Skip VLM, produce frames only |
-| `--verbose, -v` | — | Enable debug logging |
+```bash
+mkdir -p .local/vlm_annotations/logs
+
+tmux new-session -d -s vlm-annotate   "set -o pipefail; pickup-putdown annotate-vlm   .local/candidate_staging/candidates   --output-dir .local/vlm_annotations   --force   --vlm-base-url http://localhost:8000   --vlm-model Qwen3.6-27B-UD-Q4_K_XL   --vlm-timeout 180   -v 2>&1 | tee .local/vlm_annotations/logs/run_$(date -u +%Y%m%dT%H%M%SZ).log"
+```
+
+Watch the run:
+
+```bash
+tmux attach -t vlm-annotate
+```
+
+Detach with `Ctrl+B`, then `D`.
+
+List sessions:
+
+```bash
+tmux ls
+```
+
+## Resume after interruption
+
+Restart **without** `--force` so completed candidates are skipped:
+
+```bash
+pickup-putdown annotate-vlm   .local/candidate_staging/candidates   --output-dir .local/vlm_annotations   --vlm-base-url http://localhost:8000   --vlm-model Qwen3.6-27B-UD-Q4_K_XL   --vlm-timeout 180   -v
+```
 
 ## Outputs
 
-Written to `--output-dir`:
+Written under `.local/vlm_annotations/`:
 
-- `raw/<candidate_id>.json` — raw probe info, frame count, metadata
-- `normalized/<candidate_id>.json` — normalized events and ignore intervals
-- `review_frames/<candidate_id>/` — extracted frames and contact sheet
-- `events.csv` — canonical event rows across all candidates
-- `processing.csv` — per-candidate processing ledger
-- `summary.json` — aggregate pipeline summary
-- `vlm_run_<timestamp>.log` — combined stdout/stderr (when using tee)
+- `raw/` — VLM response and candidate metadata
+- `normalized/` — validated candidate annotations
+- `review_frames/` — extracted frames and contact sheets
+- `events.csv` — canonical event rows
+- `processing.csv` — per-candidate status ledger
+- `summary.json` — aggregate run summary
+- `logs/` — tmux run logs
 
-## Troubleshooting
+## Check results
 
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `Connection refused` | llama.cpp not running | Start server, verify port mapping |
-| `image input is not supported` | Text-only model | Load vision model with `--mmproj` |
-| `Failed to load image or audio file` | mmproj missing | Add `--mmproj /path/to/mmproj.gguf` to server |
-| `HTTP 500` | Vision path misconfigured | Check server logs for mmproj errors |
+```bash
+jq . .local/vlm_annotations/summary.json
+```
+
+```bash
+awk -F, 'NR > 1 {count[$3]++} END {for (s in count) print s, count[s]}'   .local/vlm_annotations/processing.csv
+```
+
+## Common failures
+
+| Error | Action |
+|---|---|
+| Connection refused | Start llama.cpp and verify port `8000` |
+| Vision not supported | Confirm `mmproj-BF16.gguf` is loaded |
+| HTTP 500 | Check `docker compose logs llm` |
+| Interrupted run | Resume without `--force` |
