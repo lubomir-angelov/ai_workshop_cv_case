@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pickup_putdown.common.schemas import Event, EventType
+from pickup_putdown.common.schemas import Candidate, Event, EventType, PoseObservation
 from pickup_putdown.layer1.track_a.contracts import (
     CropGeometry,
     FeatureDataset,
@@ -41,6 +41,7 @@ from pickup_putdown.layer1.track_a.reviewed_dataset import (
     resolve_reviewed_examples,
     validate_split_isolation,
 )
+from pickup_putdown.layer1.track_a.sampling import get_wrist_trajectory_for_candidate
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -971,3 +972,319 @@ class TestCachedEmbeddings:
         loaded = load_embedding(cache_dir, key)
         assert loaded is not None
         np.testing.assert_array_almost_equal(loaded, emb)
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Pose-candidate association
+# ---------------------------------------------------------------------------
+
+
+class TestPoseCandidateAssociation:
+    """Tests for pose observation matching to candidates."""
+
+    def _make_pose(
+        self,
+        clip_id="clip1",
+        timestamp_s=10.0,
+        actor_id="actor_1",
+        hand_side="right",
+    ) -> PoseObservation:
+        return PoseObservation(
+            clip_id=clip_id,
+            timestamp_s=timestamp_s,
+            source_frame_index=0,
+            sample_index=0,
+            actor_id=actor_id,
+            hand_side=hand_side,
+            wrist_x=100.0,
+            wrist_y=200.0,
+            wrist_confidence=0.9,
+        )
+
+    def _make_candidate(
+        self,
+        candidate_id="c1",
+        clip_id="clip1",
+        actor_id="actor_1",
+        hand_side="right",
+        window_start_s=8.0,
+        window_end_s=12.0,
+    ) -> Candidate:
+        return Candidate(
+            candidate_id=candidate_id,
+            clip_id=clip_id,
+            actor_id=actor_id,
+            hand_side=hand_side,
+            raw_start_s=window_start_s,
+            raw_end_s=window_end_s,
+            window_start_s=window_start_s,
+            window_end_s=window_end_s,
+        )
+
+    def test_pose_keyed_by_clip_id_matches_candidate(self):
+        """Pose observations keyed by source clip_id match correct candidate."""
+        poses = [
+            self._make_pose(timestamp_s=10.0),
+            self._make_pose(timestamp_s=11.0),
+        ]
+        cand = self._make_candidate()
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 2
+
+    def test_candidate_with_nonzero_source_start_receives_poses(self):
+        """A candidate with nonzero source_start_s receives poses correctly."""
+        poses = [
+            self._make_pose(timestamp_s=120.0),
+            self._make_pose(timestamp_s=125.0),
+        ]
+        cand = self._make_candidate(
+            window_start_s=118.0,
+            window_end_s=128.0,
+        )
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 2
+
+    def test_window_relative_to_source_timestamp_conversion(self):
+        """Window-relative pose timestamps are converted to source timestamps once."""
+        window_start = 100.0
+        poses = [self._make_pose(timestamp_s=window_start + rel_t) for rel_t in [1.0, 2.0, 3.0]]
+        cand = self._make_candidate(
+            window_start_s=window_start,
+            window_end_s=window_start + 5.0,
+        )
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 3
+        assert matched[0].timestamp_s == pytest.approx(window_start + 1.0)
+
+    def test_source_to_candidate_relative_timestamp(self):
+        """Source timestamps convert to candidate-relative timestamps exactly once."""
+        source_start = 100.0
+        poses = [self._make_pose(timestamp_s=source_start + rel_t) for rel_t in [1.0, 2.0, 3.0]]
+        cand = self._make_candidate(
+            window_start_s=source_start,
+            window_end_s=source_start + 5.0,
+        )
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        cand_relative = [m.timestamp_s - cand.window_start_s for m in matched]
+        assert cand_relative == pytest.approx([1.0, 2.0, 3.0])
+
+    def test_two_candidates_same_clip_get_own_poses(self):
+        """Two candidates from same clip receive only their own overlapping poses."""
+        poses = [
+            self._make_pose(timestamp_s=10.0),
+            self._make_pose(timestamp_s=20.0),
+        ]
+        cand_a = self._make_candidate(
+            candidate_id="ca",
+            window_start_s=8.0,
+            window_end_s=12.0,
+        )
+        cand_b = self._make_candidate(
+            candidate_id="cb",
+            window_start_s=18.0,
+            window_end_s=22.0,
+        )
+        matched_a = get_wrist_trajectory_for_candidate(cand_a, poses)
+        matched_b = get_wrist_trajectory_for_candidate(cand_b, poses)
+        assert len(matched_a) == 1
+        assert matched_a[0].timestamp_s == pytest.approx(10.0)
+        assert len(matched_b) == 1
+        assert matched_b[0].timestamp_s == pytest.approx(20.0)
+
+    def test_different_clips_do_not_share_poses(self):
+        """Candidates from different clips do not share observations."""
+        poses = [self._make_pose(clip_id="clip1", timestamp_s=10.0)]
+        cand = self._make_candidate(clip_id="clip2")
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 0
+
+    def test_no_matching_pose_returns_empty(self):
+        """A candidate with no matching observations returns empty list."""
+        poses = [self._make_pose(clip_id="other_clip")]
+        cand = self._make_candidate()
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert matched == []
+
+    def test_actor_id_mismatch_skips(self):
+        """Pose with wrong actor_id does not match candidate."""
+        poses = [self._make_pose(actor_id="actor_2")]
+        cand = self._make_candidate(actor_id="actor_1")
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 0
+
+    def test_hand_side_mismatch_skips(self):
+        """Pose with wrong hand_side does not match candidate."""
+        poses = [self._make_pose(hand_side="left")]
+        cand = self._make_candidate(hand_side="right")
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 14: Metadata passthrough
+# ---------------------------------------------------------------------------
+
+
+class TestMetadataPassthrough:
+    """Tests that actor_id/hand_side/region_id flow through the pipeline."""
+
+    def test_candidate_metadata_loads_actor_id(self, tmp_path: Path):
+        """CandidateMetadata loaded from JSON includes actor_id and hand_side."""
+        staging = tmp_path / "staging"
+        clip_dir = staging / "candidates" / "clip1"
+        clip_dir.mkdir(parents=True)
+        meta_file = clip_dir / "clip1.json"
+        meta_file.write_text(
+            json.dumps(
+                {
+                    "source_video_id": "clip1",
+                    "candidates": [
+                        {
+                            "candidate_id": "cand_a",
+                            "source_start_s": 10.0,
+                            "source_end_s": 12.0,
+                            "duration_s": 2.0,
+                            "actor_id": "actor_5",
+                            "hand_side": "right",
+                            "region_id": "shelf_1",
+                        }
+                    ],
+                }
+            )
+        )
+
+        index = load_candidate_metadata_index(staging)
+        assert index["cand_a"].actor_id == "actor_5"
+        assert index["cand_a"].hand_side == "right"
+        assert index["cand_a"].region_id == "shelf_1"
+
+    def test_resolve_reviewed_examples_passes_actor_id(self, tmp_path: Path):
+        """ReviewedExample gets actor_id/hand_side from metadata."""
+        json_dir = tmp_path / "json"
+        json_dir.mkdir()
+        (json_dir / "cand_x.json").write_text(
+            json.dumps(
+                {
+                    "candidate_id": "cand_x",
+                    "clip_id": "clip1",
+                    "source_start_s": 10.0,
+                    "source_end_s": 12.0,
+                    "events": [
+                        {"label": "pickup", "start_s": 0.5, "end_s": 1.5, "confidence": "high"}
+                    ],
+                }
+            )
+        )
+
+        manifest = tmp_path / "m.csv"
+        with open(manifest, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "candidate_id",
+                    "clip_id",
+                    "review_groups",
+                    "video_path",
+                    "json_path",
+                    "event_count",
+                    "reviewed",
+                    "review_notes",
+                ]
+            )
+            writer.writerow(
+                [
+                    "cand_x",
+                    "clip1",
+                    "vlm_positive",
+                    "/v/c.mp4",
+                    str(json_dir / "cand_x.json"),
+                    1,
+                    "true",
+                    "confirmed",
+                ]
+            )
+
+        meta = {
+            "cand_x": CandidateMetadata(
+                candidate_id="cand_x",
+                clip_id="clip1",
+                source_start_s=10.0,
+                source_end_s=12.0,
+                duration_s=2.0,
+                actor_id="actor_3",
+                hand_side="left",
+                region_id="shelf_2",
+            )
+        }
+
+        records = load_review_manifest(manifest)
+        examples, _ = resolve_reviewed_examples(records, [], meta)
+        assert len(examples) == 1
+        assert examples[0].actor_id == "actor_3"
+        assert examples[0].hand_side == "left"
+        assert examples[0].region_id == "shelf_2"
+
+    def test_negative_example_passes_actor_id(self, tmp_path: Path):
+        """Negative (zero-event) example also gets actor_id/hand_side."""
+        json_dir = tmp_path / "json"
+        json_dir.mkdir()
+        (json_dir / "cand_n.json").write_text(
+            json.dumps(
+                {
+                    "candidate_id": "cand_n",
+                    "clip_id": "clip1",
+                    "source_start_s": 20.0,
+                    "source_end_s": 24.0,
+                    "events": [],
+                }
+            )
+        )
+
+        manifest = tmp_path / "m.csv"
+        with open(manifest, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "candidate_id",
+                    "clip_id",
+                    "review_groups",
+                    "video_path",
+                    "json_path",
+                    "event_count",
+                    "reviewed",
+                    "review_notes",
+                ]
+            )
+            writer.writerow(
+                [
+                    "cand_n",
+                    "clip1",
+                    "negative_sample",
+                    "/v/c.mp4",
+                    str(json_dir / "cand_n.json"),
+                    0,
+                    "true",
+                    "confirmed negative",
+                ]
+            )
+
+        meta = {
+            "cand_n": CandidateMetadata(
+                candidate_id="cand_n",
+                clip_id="clip1",
+                source_start_s=20.0,
+                source_end_s=24.0,
+                duration_s=4.0,
+                actor_id="actor_7",
+                hand_side="right",
+                region_id="shelf_3",
+            )
+        }
+
+        records = load_review_manifest(manifest)
+        examples, _ = resolve_reviewed_examples(records, [], meta)
+        assert len(examples) == 1
+        assert examples[0].label == "negative"
+        assert examples[0].actor_id == "actor_7"
+        assert examples[0].hand_side == "right"
+        assert examples[0].region_id == "shelf_3"

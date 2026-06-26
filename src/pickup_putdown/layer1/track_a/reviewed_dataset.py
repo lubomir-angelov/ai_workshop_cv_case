@@ -58,6 +58,9 @@ class CandidateMetadata:
     source_start_s: float
     source_end_s: float
     duration_s: float
+    actor_id: str | None = None
+    hand_side: str | None = None
+    region_id: str | None = None
 
 
 @dataclass
@@ -87,6 +90,7 @@ class BuildSummary:
     negatives: int = 0
     excluded_unreviewed: int = 0
     excluded_no_match: int = 0
+    no_pose: int = 0
     errors: list[str] = field(default_factory=list)
     records_by_split: dict[str, int] = field(default_factory=dict)
     records_by_label: dict[str, int] = field(default_factory=dict)
@@ -290,6 +294,9 @@ def load_candidate_metadata_index(
                 source_start_s=float(cand.get("source_start_s", 0)),
                 source_end_s=float(cand.get("source_end_s", 0)),
                 duration_s=float(cand.get("duration_s", 0)),
+                actor_id=cand.get("actor_id"),
+                hand_side=cand.get("hand_side"),
+                region_id=cand.get("region_id"),
             )
 
     logger.info("Indexed %d candidates from %s", len(index), candidates_dir)
@@ -590,6 +597,9 @@ def resolve_reviewed_examples(
                     label="negative",
                     source_start_s=meta.source_start_s,
                     source_end_s=meta.source_end_s,
+                    actor_id=meta.actor_id,
+                    hand_side=meta.hand_side,
+                    region_id=meta.region_id,
                     review_status="reviewed",
                     review_notes=record.review_notes,
                 )
@@ -620,6 +630,9 @@ def resolve_reviewed_examples(
                 label=best_label,
                 source_start_s=meta.source_start_s,
                 source_end_s=meta.source_end_s,
+                actor_id=meta.actor_id,
+                hand_side=meta.hand_side,
+                region_id=meta.region_id,
                 matched_event_ids=event_ids,
                 matched_event_labels=event_labels,
                 review_status="reviewed",
@@ -1047,6 +1060,13 @@ def build_reviewed_feature_dataset(
         embedder=embedder,
         label_overrides=label_overrides,
     )
+
+    if examples and not dataset.records:
+        raise RuntimeError(
+            f"Feature dataset contains zero records despite {len(examples)} reviewed inputs. "
+            "Check candidate-to-pose association, actor_id/hand_side fields, "
+            "and timestamp domains."
+        )
 
     # Validate
     validate_ds_split(dataset)

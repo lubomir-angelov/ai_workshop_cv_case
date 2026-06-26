@@ -466,6 +466,7 @@ def build_feature_dataset(
     skipped_no_video = 0
     skipped_no_split = 0
     skipped_no_region = 0
+    skipped_no_pose = 0
 
     for i, candidate in enumerate(candidates):
         # Skip if overlaps ignore interval
@@ -522,6 +523,9 @@ def build_feature_dataset(
             label_override=label_overrides.get(candidate.candidate_id),
         )
 
+        if not records:
+            skipped_no_pose += 1
+
         all_records.extend(records)
 
         # Progress logging
@@ -547,7 +551,8 @@ def build_feature_dataset(
     logger.info(f"  Splits: {dataset.n_train} train, {dataset.n_val} val, {dataset.n_test} test")
     logger.info(
         f"  Skipped: {skipped_ignore} ignore, {skipped_no_video} no_video, "
-        f"{skipped_no_split} no_split, {skipped_no_region} no_region"
+        f"{skipped_no_split} no_split, {skipped_no_region} no_region, "
+        f"{skipped_no_pose} no_pose"
     )
 
     return dataset
