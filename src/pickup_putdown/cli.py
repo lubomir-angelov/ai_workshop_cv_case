@@ -2767,5 +2767,151 @@ def finalize_task_7(
     typer.echo("Review required before use as final evaluation ground truth.")
 
 
+@app.command()
+def build_track_a_dataset(
+    events_csv: str = typer.Option(
+        ".local/task_7_vlm/events.csv",
+        "--events-csv",
+        "-e",
+        help="Path to canonical events CSV.",
+    ),
+    clips_csv: str = typer.Option(
+        ".local/task_7_vlm/clips.csv",
+        "--clips-csv",
+        help="Path to clips CSV.",
+    ),
+    review_manifest: str = typer.Option(
+        ".local/task_7_review/review_manifest.csv",
+        "--review-manifest",
+        "-r",
+        help="Path to review manifest CSV.",
+    ),
+    candidate_metadata_dir: str = typer.Option(
+        ".local/candidate_staging",
+        "--candidate-metadata-dir",
+        help="Path to candidate staging directory.",
+    ),
+    source_video_dir: str = typer.Option(
+        ".local/source_videos",
+        "--source-video-dir",
+        help="Path to source video directory.",
+    ),
+    output_dir: str = typer.Option(
+        ".local/track_a_features",
+        "--output-dir",
+        "-o",
+        help="Output directory for features and manifest.",
+    ),
+    split_seed: int = typer.Option(
+        42,
+        "--split-seed",
+        help="Random seed for deterministic split assignment.",
+    ),
+    config: str = typer.Option(
+        "configs/proposals.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file.",
+    ),
+    shelves_config: str = typer.Option(
+        "configs/shelves.yaml",
+        "--shelves-config",
+        help="Path to shelf/surface region configuration YAML file.",
+    ),
+    camera_id: str = typer.Option(
+        "store_camera_01",
+        "--camera-id",
+        help="Camera ID from the shelf configuration.",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable debug logging.",
+    ),
+) -> None:
+    """Build the reviewed Track A feature dataset.
+
+    Loads the reviewed Task 7 data, resolves reviewed examples, assigns
+    train/val/test splits by recording day, runs pose inference, extracts
+    features, and saves the feature dataset manifest with cached embeddings.
+    """
+    _setup_logging(verbose)
+
+    from pathlib import Path
+
+    from pickup_putdown.config import load_config
+    from pickup_putdown.layer1.track_a.reviewed_dataset import (
+        build_reviewed_feature_dataset,
+    )
+    from pickup_putdown.perception.shelf_regions import (
+        get_expanded_regions,
+        get_regions_for_camera,
+        load_shelf_config,
+    )
+
+    cfg = load_config(Path(config))
+
+    # Load shelf regions
+    shelf_cfg = load_shelf_config(Path(shelves_config))
+    camera_cfg = get_regions_for_camera(shelf_cfg, camera_id)
+    _expanded_regions = get_expanded_regions(camera_cfg)  # noqa: F841
+    shelf_regions = {region.region_id: region.points for region in camera_cfg.regions}
+
+    typer.echo("=== Building Reviewed Track A Dataset ===")
+    typer.echo(f"  Review manifest:   {review_manifest}")
+    typer.echo(f"  Events CSV:        {events_csv}")
+    typer.echo(f"  Clips CSV:         {clips_csv}")
+    typer.echo(f"  Candidate staging: {candidate_metadata_dir}")
+    typer.echo(f"  Source videos:     {source_video_dir}")
+    typer.echo(f"  Output dir:        {output_dir}")
+    typer.echo(f"  Split seed:        {split_seed}")
+    typer.echo(f"  Camera:            {camera_id}")
+    typer.echo(f"  Shelf regions:     {len(shelf_regions)}")
+    typer.echo("")
+
+    try:
+        dataset, summary = build_reviewed_feature_dataset(
+            review_manifest_path=review_manifest,
+            events_path=events_csv,
+            clips_path=clips_csv,
+            candidate_staging_dir=candidate_metadata_dir,
+            source_video_dir=source_video_dir,
+            output_dir=output_dir,
+            pose_cfg=cfg.pose,
+            track_a_cfg=cfg.track_a_features,
+            shelf_regions=shelf_regions,
+            split_seed=split_seed,
+        )
+    except Exception as exc:
+        typer.echo(f"Error building dataset: {exc}", err=True)
+        raise SystemExit(1) from exc
+
+    typer.echo("")
+    typer.echo("=== Build Summary ===")
+    typer.echo(f"  Total reviewed:    {summary.total_reviewed}")
+    typer.echo(f"  Positives:         {summary.positives}")
+    typer.echo(f"  Negatives:         {summary.negatives}")
+    typer.echo(f"  Excluded unreviewed: {summary.excluded_unreviewed}")
+    typer.echo(f"  Total records:     {len(dataset.records)}")
+    typer.echo("")
+    typer.echo("  Records by split:")
+    for split, count in sorted(summary.records_by_split.items()):
+        typer.echo(f"    {split}: {count}")
+    typer.echo("  Records by label:")
+    for label, count in sorted(summary.records_by_label.items()):
+        typer.echo(f"    {label}: {count}")
+    typer.echo("  Records by position:")
+    for pos, count in sorted(summary.records_by_position.items()):
+        typer.echo(f"    {pos}: {count}")
+    typer.echo("  Records by crop type:")
+    for ct, count in sorted(summary.records_by_crop_type.items()):
+        typer.echo(f"    {ct}: {count}")
+    typer.echo("")
+    typer.echo(f"  Manifest:          {output_dir}/feature_dataset.parquet")
+    typer.echo(f"  Splits:            {output_dir}/splits.json")
+    typer.echo(f"  Build summary:     {output_dir}/build_summary.json")
+
+
 if __name__ == "__main__":
     app()

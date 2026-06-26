@@ -61,7 +61,8 @@ VIDEO ?= $(TRIAGE_INPUT)
 	task_3 task_4 task_5 \
 	annotation-pull annotation-up annotation-down annotation-restart annotation-status annotation-logs \
 	annotation-config-validate annotation-test annotation-acceptance annotation-reset \
-candidates-remote candidates-download candidates-upload candidates-generate candidates-process-local
+ candidates-remote candidates-download candidates-upload candidates-generate candidates-process-local \
+ track-a-dataset
 
 # ---------------------------------------------------------------------------
 # General development targets
@@ -523,5 +524,35 @@ candidates-process-local: ## Process downloaded sources locally (GPU parallel, C
 		--local-output-dir "$(CANDIDATE_LOCAL_OUTPUT_DIR)" \
 		$(if $(CANDIDATE_KEEP_LOCAL_FILES),--keep-local-files,) \
 		$(if $(CANDIDATE_OVERWRITE),--overwrite,) \
+		-v
+
+# ---------------------------------------------------------------------------
+# Track A: reviewed feature dataset
+# ---------------------------------------------------------------------------
+
+TRACK_A_EVENTS_CSV ?= .local/task_7_vlm/events.csv
+TRACK_A_CLIPS_CSV ?= .local/task_7_vlm/clips.csv
+TRACK_A_REVIEW_MANIFEST ?= .local/task_7_review/review_manifest.csv
+TRACK_A_CANDIDATE_DIR ?= .local/candidate_staging
+TRACK_A_SOURCE_VIDEO_DIR ?= .local/source_videos
+TRACK_A_OUTPUT_DIR ?= .local/track_a_features
+TRACK_A_SPLIT_SEED ?= 42
+TRACK_A_CONFIG ?= configs/proposals.yaml
+TRACK_A_SHELVES_CONFIG ?= configs/shelves.yaml
+TRACK_A_CAMERA_ID ?= store_camera_01
+
+track-a-dataset: ## Build the reviewed Track A feature dataset
+	@echo "=== Building Reviewed Track A Dataset ==="
+	@$(PICKUP_PUTDOWN) build-track-a-dataset \
+		--events-csv "$(TRACK_A_EVENTS_CSV)" \
+		--clips-csv "$(TRACK_A_CLIPS_CSV)" \
+		--review-manifest "$(TRACK_A_REVIEW_MANIFEST)" \
+		--candidate-metadata-dir "$(TRACK_A_CANDIDATE_DIR)" \
+		--source-video-dir "$(TRACK_A_SOURCE_VIDEO_DIR)" \
+		--output-dir "$(TRACK_A_OUTPUT_DIR)" \
+		--split-seed $(TRACK_A_SPLIT_SEED) \
+		--config "$(TRACK_A_CONFIG)" \
+		--shelves-config "$(TRACK_A_SHELVES_CONFIG)" \
+		--camera-id "$(TRACK_A_CAMERA_ID)" \
 		-v
 
