@@ -105,3 +105,24 @@ Recommended Order
 4. Phase 4 (inference) — integrates all above
 5. Phase 5 (CLI) — exposes to user
 6. Phase 6 (evaluation) — measures quality
+
+
+S3 Bucket Analysis — s3://chillnbite-cameras/anon/
+What's in S3
+Prefix	Count	Size	Content
+anon/*.mp4 (root)	~395 files	~5.8 GB	Source videos
+anon/candidates/videos/	1527 files	~25 GB	Candidate MP4 clips
+anon/candidates/metadata/	75 files	~1 MB	Candidate metadata JSONs (per source video)
+anon/vlm/2026-06-26/vlm_annotations/	3059 files	~30 KB	VLM annotations: events.csv (48 events), normalized/ (1527 JSONs), raw/ (1527 JSONs), processing.csv, summary.json
+anon/vlm/2026-06-26/task_7_vlm/	6 files	~365 KB	Task 7: clips.csv, events.csv (41 events), processing.csv, dedup_audit.json, provenance.json, summary.json
+anon/vlm/2026-06-26/task_7_review/	1 file	~14 KB	review_manifest.csv
+Answer: Yes, everything is in S3.
+All the data needed for the Track A plan is already uploaded to s3://chillnbite-cameras/anon/vlm/2026-06-26/. No local transfer required.
+On another device:
+# Download ground truth + annotations
+aws s3 sync s3://chillnbite-cameras/anon/vlm/2026-06-26/vlm_annotations/ .local/vlm_annotations/
+aws s3 cp s3://chillnbite-cameras/anon/vlm/2026-06-26/task_7_review/review_manifest.csv .local/task_7_review/
+
+# Download source videos on-demand (only clips with events needed)
+# Or download all candidate videos for the event-bearing clips
+The two events.csv files differ slightly: vlm_annotations/events.csv has 48 events, task_7_vlm/events.csv has 41 (deduplicated post-review). Use task_7_vlm/events.csv as the canonical ground truth since it's post-manual-review.
