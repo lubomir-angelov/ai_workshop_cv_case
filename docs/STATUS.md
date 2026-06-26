@@ -16,6 +16,7 @@ Pickup and putdown event detection in store video.
 | 8 | Shared evaluation framework, canonical export | ✅ Done |
 | 9 | Track A Phase 1 — reviewed feature dataset (embeddings, splits, manifest) | ✅ Done |
 | 10 | Track A Phase 2 — hand-state + shelf-transition classifiers | ✅ Done |
+| 11 | Track A Phase 3 — repeating temporal state machine | ✅ Done |
 
 ## Track A — Phase 1 (Feature Dataset)
 
@@ -62,6 +63,50 @@ pickup-putdown train-track-a --config configs/track_a.yaml --output-dir .local/t
 make train-track-a
 ```
 
+## Track A — Phase 3 (State Machine)
+
+Deterministic repeating state machine that converts per-frame classifier
+probabilities into pickup/putdown events.
+
+### States
+
+`OUTSIDE → APPROACHING → CONTACT → TRANSFER → WITHDRAWING → OUTSIDE`
+
+Processes observations per `(clip_id, actor_id, hand_side, region_id)` stream.
+Supports multiple interaction cycles per stream.
+
+### Evidence rules
+
+- **Pickup**: pre-transfer hand empty + post-transfer hand carrying + shelf object\_removed
+- **Putdown**: pre-transfer hand carrying + post-transfer hand empty + shelf object\_placed
+- Both require configurable probability thresholds and minimum transfer duration
+- Uncertain/contradictory interactions remain background (no event emitted)
+
+### Configuration
+
+All thresholds in `configs/track_a.yaml` under `state_machine:`:
+temporal (approach, contact, transfer, withdrawal, gap, timeout),
+probability (hand, shelf, uncertainty ratio),
+confidence (weights for hand/shelf/trajectory, emission threshold).
+
+### API
+
+```python
+machine = RepeatingInteractionStateMachine(config)
+events = machine.process(observations)  # batch
+event = machine.update(observation)     # incremental
+```
+
+### Files
+
+- `src/pickup_putdown/layer1/track_a/state_machine.py` — enums, config, observation/event contracts, state machine
+- `configs/track_a.yaml` — extended with `state_machine` section
+- `tests/test_state_machine.py` — 36 tests (fully synthetic, no real models)
+
+### Test results
+
+36/36 pass. Total Track A test suite: 140/140 pass.
+
 ## Known Limitations
 
 - Small dataset: 50 reviewed candidates, imbalanced classes, limited val coverage
@@ -69,10 +114,13 @@ make train-track-a
 - Contact/mid positions excluded from supervised training (no reliable label)
 - Negative candidates excluded from hand-state training (no explicit hand-state annotation)
 - Thresholds are baseline defaults, not tuned on held-out data
+- State machine transfer detection requires transition observation inside region; withdrawal on the exact transition frame may miss the event
+- Confidence formula is a simple weighted mean; no learned calibration
+- No global cross-candidate deduplication (deferred to Phase 4 post-processing)
+- Event boundaries are provisional; Phase 4 will refine them
 
 ## Next
 
-- Track A Phase 3: repeating state machine, event emission, boundary estimation
-- Track A end-to-end inference and `predictions.csv`
+- Track A Phase 4: inference pipeline, boundary refinement, canonical `predictions.csv`
 - Track B1/B2: VideoMAE window classifiers
 - Layer 2/3: Qwen VLM verification and fusion
