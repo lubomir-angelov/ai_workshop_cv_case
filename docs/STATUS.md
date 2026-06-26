@@ -17,6 +17,7 @@ Pickup and putdown event detection in store video.
 | 9 | Track A Phase 1 — reviewed feature dataset (embeddings, splits, manifest) | ✅ Done |
 | 10 | Track A Phase 2 — hand-state + shelf-transition classifiers | ✅ Done |
 | 11 | Track A Phase 3 — repeating temporal state machine | ✅ Done |
+| 12 | Track A Phase 4 — inference pipeline, boundary refinement, dedup | ✅ Done |
 
 ## Track A — Phase 1 (Feature Dataset)
 
@@ -107,6 +108,69 @@ event = machine.update(observation)     # incremental
 
 36/36 pass. Total Track A test suite: 140/140 pass.
 
+## Track A — Phase 4 (Inference Pipeline)
+
+End-to-end callable pipeline that integrates feature extraction, trained classifiers, and the repeating state machine into canonical predictions.
+
+### Data flow
+
+```
+candidates + poses
+  → validation (identity, video, pose, shelf region)
+  → sliding-window sampling (configurable FPS, default 4 Hz)
+  → hand/shelf feature extraction with cache reuse
+  → classifier probabilities (empty/carrying/uncertain, removed/placed/no_change/uncertain)
+  → TrackAObservation construction (pose trajectory + classifier evidence)
+  → RepeatingInteractionStateMachine per (clip, actor, hand, region) stream
+  → transition-frame grace window (0.25 s default)
+  → boundary refinement (clip/candidate bounds, min duration)
+  → cross-candidate deduplication (temporal IoU + transfer proximity)
+  → CanonicalPrediction + predictions.csv + diagnostics
+```
+
+### Features
+
+- **Artifact validation**: embedding dimension, encoder name/version, required classes
+- **Sliding-window sampling**: uniform samples at configurable FPS across candidate window
+- **Grace window**: recovers events lost when wrist exits on the transition frame
+- **Boundary refinement**: enforces clip/candidate bounds, start < end, minimum duration
+- **Deduplication**: temporal IoU + transfer-time tolerance, keeps highest-confidence, preserves audit
+- **Diagnostics**: per-candidate trace, confidence distribution, skip reasons, raw events, dedup audit
+- **Canonical output**: `predictions.csv` compatible with evaluator schema
+
+### State machine fix
+
+`_last_event_s` no longer updated for rejected events. A failed low-confidence emission attempt cannot suppress a later valid event through `minimum_event_separation_s`.
+
+### API
+
+```python
+pipeline = TrackAInferencePipeline(config)
+result = pipeline.run(
+    candidates=candidates,
+    pose_observations=poses,
+    source_videos=video_paths,
+    hand_classifier_path=hand_path,
+    shelf_classifier_path=shelf_path,
+    output_dir=output_dir,
+)
+```
+
+### Configuration
+
+`configs/track_a.yaml` under `inference:`: sampling FPS, boundary refinement, deduplication thresholds, grace window, debug traces.
+
+### Files
+
+- `src/pickup_putdown/layer1/track_a/inference.py` — pipeline, config, evidence, sampling, extraction, grace window, boundary refinement, dedup, canonical output
+- `src/pickup_putdown/layer1/track_a/state_machine.py` — `_last_event_s` fix
+- `configs/track_a.yaml` — extended with `inference` section
+- `tests/test_inference.py` — 55 tests (fully synthetic, no GPU/videos)
+
+### Test results
+
+55/55 pass. Total Track A test suite: 195/195 pass.
+
 ## Known Limitations
 
 - Small dataset: 50 reviewed candidates, imbalanced classes, limited val coverage
@@ -114,13 +178,15 @@ event = machine.update(observation)     # incremental
 - Contact/mid positions excluded from supervised training (no reliable label)
 - Negative candidates excluded from hand-state training (no explicit hand-state annotation)
 - Thresholds are baseline defaults, not tuned on held-out data
-- State machine transfer detection requires transition observation inside region; withdrawal on the exact transition frame may miss the event
+- State machine transfer detection requires transition observation inside region; Phase 4 adds grace window to recover transition-frame withdrawals
 - Confidence formula is a simple weighted mean; no learned calibration
-- No global cross-candidate deduplication (deferred to Phase 4 post-processing)
-- Event boundaries are provisional; Phase 4 will refine them
+- Cross-candidate deduplication is within-clip only; no global cross-video dedup
+- Event boundaries are refined but not calibrated against ground truth
+- Grace window uses fixed probability thresholds (0.55/0.50) matching state machine config
+- Shelf comparison during inference uses per-timestamp patches; not explicit pre/post reference comparison
 
 ## Next
 
-- Track A Phase 4: inference pipeline, boundary refinement, canonical `predictions.csv`
+- Track A Phase 5: public CLI, Makefile target, real-data smoke test, threshold tuning
 - Track B1/B2: VideoMAE window classifiers
 - Layer 2/3: Qwen VLM verification and fusion
