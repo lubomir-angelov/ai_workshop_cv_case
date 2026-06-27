@@ -1,0 +1,1461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pickup & Putdown Event Detection — CV Project</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #21262d;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #f78166;
+    --accent4: #d2a8ff;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --border: #30363d;
+    --yellow: #e3b341;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  .deck { width: 100%; height: 100vh; position: relative; }
+
+  .slide {
+    display: none;
+    position: absolute;
+    inset: 0;
+    padding: 52px 72px 44px;
+    flex-direction: column;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .slide.active { display: flex; }
+
+  .nav {
+    position: fixed;
+    bottom: 24px;
+    right: 32px;
+    display: flex;
+    gap: 12px;
+    z-index: 100;
+  }
+  .nav button {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 20px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background .15s;
+  }
+  .nav button:hover { background: var(--accent); color: #000; }
+
+  .progress {
+    position: fixed;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  h1 { font-size: 3.2rem; font-weight: 700; line-height: 1.15; }
+  h2 { font-size: 1.95rem; font-weight: 600; margin-bottom: 22px; color: var(--accent); }
+  h3 { font-size: 1.1rem; font-weight: 600; margin-bottom: 8px; color: var(--accent4); }
+  p, li { font-size: 1rem; line-height: 1.65; color: var(--text); }
+  ul, ol { padding-left: 1.4em; }
+  li { margin-bottom: 5px; }
+
+  .subtitle { font-size: 1.25rem; color: var(--muted); margin-top: 12px; }
+  .label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin-bottom: 6px; }
+  .tag { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 0.77rem; font-weight: 600; margin: 3px; }
+  .tag-blue   { background: rgba(88,166,255,.15);  color: var(--accent);  border: 1px solid rgba(88,166,255,.3); }
+  .tag-green  { background: rgba(63,185,80,.15);   color: var(--accent2); border: 1px solid rgba(63,185,80,.3); }
+  .tag-red    { background: rgba(247,129,102,.15); color: var(--accent3); border: 1px solid rgba(247,129,102,.3); }
+  .tag-purple { background: rgba(210,168,255,.15); color: var(--accent4); border: 1px solid rgba(210,168,255,.3); }
+  .tag-yellow { background: rgba(227,179,65,.15);  color: var(--yellow);  border: 1px solid rgba(227,179,65,.3); }
+
+  .row { display: flex; gap: 22px; }
+  .col { flex: 1; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 22px;
+  }
+  .card + .card { margin-top: 12px; }
+
+  pre, code { font-family: 'Cascadia Code','Fira Code','Consolas',monospace; font-size: 0.86rem; }
+  pre {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    overflow-x: auto;
+    line-height: 1.55;
+  }
+  code { color: var(--accent2); }
+
+  .arch-box {
+    border: 1px solid;
+    border-radius: 8px;
+    padding: 11px 14px;
+    text-align: center;
+    font-size: 0.88rem;
+  }
+  .arch-arrow { text-align: center; color: var(--muted); font-size: 1.1rem; margin: 3px 0; }
+  .arch-row { display: flex; gap: 10px; align-items: stretch; }
+  .arch-row .arch-box { flex: 1; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th {
+    background: var(--surface2);
+    color: var(--accent);
+    padding: 9px 13px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 2px solid var(--border);
+  }
+  td { padding: 8px 13px; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  .metric-row { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; }
+  .metric-box {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    text-align: center;
+    flex: 1;
+    min-width: 110px;
+  }
+  .metric-val { font-size: 1.9rem; font-weight: 700; color: var(--accent); }
+  .metric-val.green { color: var(--accent2); }
+  .metric-val.yellow { color: var(--yellow); }
+  .metric-val.red { color: var(--accent3); }
+  .metric-label { font-size: 0.78rem; color: var(--muted); margin-top: 4px; }
+
+  .bar-wrap { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+  .bar-label { width: 140px; font-size: 0.85rem; color: var(--muted); flex-shrink: 0; text-align: right; }
+  .bar-track { flex: 1; background: var(--surface2); border-radius: 4px; height: 18px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; display: flex; align-items: center; padding-left: 8px; font-size: 0.78rem; font-weight: 600; color: #000; }
+  .bar-count { font-size: 0.85rem; color: var(--muted); width: 50px; }
+
+  .step-list { list-style: none; padding: 0; }
+  .step-list li { display: flex; align-items: flex-start; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .step-list li:last-child { border-bottom: none; }
+  .step-num {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #000;
+    font-weight: 700;
+    font-size: 0.78rem;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; margin-top: 2px;
+  }
+
+  .title-slide { background: radial-gradient(ellipse at 60% 40%, rgba(88,166,255,.07) 0%, transparent 70%); }
+  .title-slide h1 span { color: var(--accent); }
+  .divider { width: 80px; height: 4px; background: var(--accent); border-radius: 2px; margin: 18px 0; }
+
+  /* Task progress */
+  .task-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 4px; }
+  .task-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 0.85rem;
+  }
+  .task-card.done   { border-color: var(--accent2); background: rgba(63,185,80,.06); }
+  .task-card.active { border-color: var(--yellow);  background: rgba(227,179,65,.06); }
+  .task-card.todo   { border-color: var(--border);  background: var(--surface2); }
+  .task-id { font-weight: 700; font-size: 0.78rem; }
+  .task-id.done   { color: var(--accent2); }
+  .task-id.active { color: var(--yellow); }
+  .task-id.todo   { color: var(--muted); }
+  .task-name { color: var(--text); margin-top: 2px; line-height: 1.3; }
+</style>
+</head>
+<body>
+<div class="deck">
+
+<!-- ════════════ SLIDE 1: TITLE ════════════ -->
+<div class="slide active title-slide">
+  <div class="label">Summer School 2026 · Computer Vision Case</div>
+  <h1>Pickup &amp; Putdown<br><span>Event Detection</span></h1>
+  <div class="divider"></div>
+  <p class="subtitle">Temporal action localization in retail self-checkout video</p>
+  <div style="margin-top:36px; display:flex; gap:12px; flex-wrap:wrap;">
+    <span class="tag tag-blue">Temporal Action Detection</span>
+    <span class="tag tag-green">Computer Vision</span>
+    <span class="tag tag-purple">Vision-Language Models</span>
+    <span class="tag tag-yellow">Retail Analytics</span>
+    <span class="tag tag-red">Multi-layer Pipeline</span>
+  </div>
+  <div style="margin-top:32px; display:flex; gap:24px;">
+    <div class="metric-box" style="text-align:left; padding:14px 20px;">
+      <div class="metric-val" style="font-size:1.4rem;">4.93 h</div>
+      <div class="metric-label">Source video processed</div>
+    </div>
+    <div class="metric-box" style="text-align:left; padding:14px 20px;">
+      <div class="metric-val green" style="font-size:1.4rem;">1,527</div>
+      <div class="metric-label">Interaction candidates</div>
+    </div>
+    <div class="metric-box" style="text-align:left; padding:14px 20px;">
+      <div class="metric-val yellow" style="font-size:1.4rem;">8 / 13</div>
+      <div class="metric-label">Tasks completed</div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 2: PROBLEM ════════════ -->
+<div class="slide">
+  <h2>The Problem</h2>
+  <div class="row" style="gap:28px; align-items:flex-start;">
+    <div class="col">
+      <div class="card">
+        <div class="label">Business context</div>
+        <p>Self-checkout stores need to automatically track when customers <strong>pick up</strong> or <strong>put down</strong> items at shelves — without manual review of hours of CCTV footage.</p>
+      </div>
+      <div class="card">
+        <div class="label">The core challenge</div>
+        <ul>
+          <li>Video is <strong>long and mostly uneventful</strong> — events are rare</li>
+          <li>Pickup and putdown are <strong>near-identical visually</strong> — only temporal direction separates them</li>
+          <li>Multiple people, occlusions, cluttered shelves</li>
+          <li>4K footage (3840×2160) at 20 FPS</li>
+          <li>Privacy constraints — no face identification</li>
+        </ul>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card" style="border-color: var(--accent);">
+        <div class="label" style="color:var(--accent);">Technical framing</div>
+        <p style="margin-bottom:10px;">This is <strong>Temporal Action Detection</strong> on untrimmed video — not simple action recognition.</p>
+        <pre>Output per video:
+  clip_id
+  event_type: pickup | putdown
+  t_start  (seconds)
+  t_end    (seconds)
+  score</pre>
+      </div>
+      <div class="card">
+        <div class="label">Key insight</div>
+        <p>Pickup and putdown are <em>time-reverses</em> of each other. Any method that discards temporal order will fail to distinguish them.</p>
+        <pre style="margin-top:8px;">pickup:  shelf/surface → hand
+putdown: hand → shelf/surface</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 3: DATASET OVERVIEW ════════════ -->
+<div class="slide">
+  <h2>Dataset at a Glance</h2>
+  <div class="metric-row" style="margin-bottom: 20px;">
+    <div class="metric-box">
+      <div class="metric-val">88</div>
+      <div class="metric-label">Source clips in ledger</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric-val green">75</div>
+      <div class="metric-label">Successfully processed</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric-val yellow">4.93 h</div>
+      <div class="metric-label">Total source video</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric-val">5</div>
+      <div class="metric-label">Recording days (May 20–26)</div>
+    </div>
+    <div class="metric-box">
+      <div class="metric-val red">21</div>
+      <div class="metric-label">Permanently skipped (timeout)</div>
+    </div>
+  </div>
+  <div class="row" style="gap:22px;">
+    <div class="col">
+      <div class="card">
+        <h3>Video properties</h3>
+        <table>
+          <tr><th>Property</th><th>Value</th></tr>
+          <tr><td>Resolution</td><td>3840 × 2160 (4K)</td></tr>
+          <tr><td>Frame rate</td><td>20 FPS</td></tr>
+          <tr><td>Codec</td><td>H.264</td></tr>
+          <tr><td>Avg clip duration</td><td>237 s (~4 min)</td></tr>
+          <tr><td>Min / Max duration</td><td>4 s / 948 s</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Clip outcome breakdown</h3>
+        <div class="bar-wrap">
+          <div class="bar-label">With candidates</div>
+          <div class="bar-track"><div class="bar-fill" style="width:56%; background:var(--accent2);">56%</div></div>
+          <div class="bar-count">42 clips</div>
+        </div>
+        <div class="bar-wrap">
+          <div class="bar-label">No candidates</div>
+          <div class="bar-track"><div class="bar-fill" style="width:44%; background:var(--muted);">44%</div></div>
+          <div class="bar-count">33 clips</div>
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card" style="border-color:var(--accent2);">
+        <h3>Candidate statistics</h3>
+        <div class="metric-row" style="margin-bottom:10px;">
+          <div class="metric-box">
+            <div class="metric-val green">1,527</div>
+            <div class="metric-label">Total candidates</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-val green">176 min</div>
+            <div class="metric-label">Candidate video</div>
+          </div>
+        </div>
+        <table>
+          <tr><th>Metric</th><th>Value</th></tr>
+          <tr><td>Avg per clip (all)</td><td>20.4</td></tr>
+          <tr><td>Avg per clip (non-zero)</td><td>36.4</td></tr>
+          <tr><td>Max in one clip</td><td>168</td></tr>
+          <tr><td>Avg candidate duration</td><td>6.92 s</td></tr>
+          <tr><td>Median duration</td><td>5.15 s</td></tr>
+          <tr><td>Min / Max duration</td><td>3.45 s / 70.0 s</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Candidate duration distribution</h3>
+        <div class="bar-wrap">
+          <div class="bar-label">&lt; 5 s</div>
+          <div class="bar-track"><div class="bar-fill" style="width:44%; background:var(--accent);">44%</div></div>
+          <div class="bar-count">677</div>
+        </div>
+        <div class="bar-wrap">
+          <div class="bar-label">5 – 10 s</div>
+          <div class="bar-track"><div class="bar-fill" style="width:42%; background:var(--accent2);">42%</div></div>
+          <div class="bar-count">641</div>
+        </div>
+        <div class="bar-wrap">
+          <div class="bar-label">10 – 20 s</div>
+          <div class="bar-track"><div class="bar-fill" style="width:11%; background:var(--yellow);">11%</div></div>
+          <div class="bar-count">163</div>
+        </div>
+        <div class="bar-wrap">
+          <div class="bar-label">&gt; 20 s</div>
+          <div class="bar-track"><div class="bar-fill" style="width:3%; background:var(--accent3);">3%</div></div>
+          <div class="bar-count">46</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 4: TASK PROGRESS ════════════ -->
+<div class="slide">
+  <h2>Task Progress — Where We Are</h2>
+  <div class="task-grid">
+    <div class="task-card done">
+      <div class="task-id done">✓ Task 1 · easy</div>
+      <div class="task-name">Repository bootstrap, config, core schemas</div>
+    </div>
+    <div class="task-card done">
+      <div class="task-id done">✓ Task 2 · medium</div>
+      <div class="task-name">Cloud inventory, video metadata, bounded S3 cache</div>
+    </div>
+    <div class="task-card done">
+      <div class="task-id done">✓ Task 3 · medium</div>
+      <div class="task-name">Layer 0A — YOLO person triage &amp; active spans</div>
+    </div>
+    <div class="task-card done">
+      <div class="task-id done">✓ Task 4 · easy</div>
+      <div class="task-name">Shelf &amp; surface region configuration</div>
+    </div>
+    <div class="task-card done">
+      <div class="task-id done">✓ Task 5 · hard</div>
+      <div class="task-name">Layer 0B — Pose tracking &amp; interaction proposals</div>
+    </div>
+    <div class="task-card done">
+      <div class="task-id done">✓ Task 6 · medium</div>
+      <div class="task-name">Annotation workflow &amp; Label Studio setup</div>
+    </div>
+    <div class="task-card done">
+      <div class="task-id done">✓ Task 6.1 · hard</div>
+      <div class="task-name">Batch candidate generation &amp; S3 upload pipeline</div>
+    </div>
+    <div class="task-card done">
+      <div class="task-id done">✓ Task 6.2 · medium</div>
+      <div class="task-name">Production annotation handoff (Label Studio ↔ S3)</div>
+    </div>
+    <div class="task-card done">
+      <div class="task-id done">✓ Task 8 · hard</div>
+      <div class="task-name">Shared two-pass temporal evaluator &amp; reports</div>
+    </div>
+    <div class="task-card active">
+      <div class="task-id active">⟳ Task 7 · medium</div>
+      <div class="task-name">Dataset validation, agreement, splits &amp; versioning</div>
+    </div>
+    <div class="task-card todo">
+      <div class="task-id todo">○ Task 9 · medium</div>
+      <div class="task-name">Track A crop extraction &amp; appearance features</div>
+    </div>
+    <div class="task-card todo">
+      <div class="task-id todo">○ Task 10 · hard</div>
+      <div class="task-name">Track A state machine &amp; event boundaries</div>
+    </div>
+    <div class="task-card todo">
+      <div class="task-id todo">○ Task 12 · hard</div>
+      <div class="task-name">Track B1 VideoMAE window classifier</div>
+    </div>
+    <div class="task-card todo">
+      <div class="task-id todo">○ Task 14 · hard</div>
+      <div class="task-name">Layer 2 — standalone Qwen3.6-27B detector</div>
+    </div>
+    <div class="task-card todo">
+      <div class="task-id todo">○ Task 16 · hard</div>
+      <div class="task-name">Batch CLI &amp; end-to-end inference</div>
+    </div>
+  </div>
+  <div style="margin-top:14px; display:flex; gap:18px; align-items:center;">
+    <span class="tag tag-green">9 completed</span>
+    <span class="tag tag-yellow">1 in progress (annotation)</span>
+    <span class="tag" style="background:rgba(139,148,158,.1); color:var(--muted); border:1px solid var(--border);">5 pending</span>
+    <span style="color:var(--muted); font-size:0.9rem; margin-left:auto;">Mandatory critical path: Tasks 7 → 9 → 10 → 12 → 14 → 16 → 17</span>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 5: ARCHITECTURE ════════════ -->
+<div class="slide">
+  <h2>System Architecture — Four-Layer Pipeline</h2>
+  <div class="row" style="gap:18px; align-items:flex-start; height: calc(100% - 80px);">
+    <div style="flex:1.2;">
+      <div class="arch-box" style="border-color:var(--muted); background:var(--surface); text-align:left; padding:12px 16px;">
+        <span style="color:var(--muted);">Source video files (S3 · chillnbite-cameras bucket)</span>
+      </div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-box" style="border-color:var(--accent); color:var(--accent);">
+        <strong>Layer 0A</strong> — Person Triage &amp; Active Spans<br>
+        <small style="color:var(--muted);">YOLO11n + ByteTrack · 1 FPS · stride 20</small>
+      </div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-box" style="border-color:var(--accent2); color:var(--accent2);">
+        <strong>Layer 0B</strong> — Pose Tracking &amp; Interaction Proposals<br>
+        <small style="color:var(--muted);">YOLO Pose + fixed shelf regions · ~8 FPS · stride 2 &nbsp;→ 1,527 candidates</small>
+      </div>
+      <div class="arch-arrow">↓ Label Studio annotation ↓</div>
+      <div class="arch-row">
+        <div class="arch-box" style="border-color:var(--accent4);">
+          <strong style="color:var(--accent4);">Track A</strong><br>
+          <small style="color:var(--muted);">Pose state machine</small>
+        </div>
+        <div class="arch-box" style="border-color:var(--accent4);">
+          <strong style="color:var(--accent4);">Track B1</strong><br>
+          <small style="color:var(--muted);">VideoMAE classifier</small>
+        </div>
+        <div class="arch-box" style="border-color:var(--accent4);">
+          <strong style="color:var(--accent4);">Track B2</strong><br>
+          <small style="color:var(--muted);">VideoMAE + TCN</small>
+        </div>
+      </div>
+      <div class="arch-arrow">↓&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↓</div>
+      <div class="arch-row">
+        <div class="arch-box" style="border-color:var(--yellow); flex:2;">
+          <strong style="color:var(--yellow);">Layer 2</strong> — Standalone Qwen3.6-27B<br>
+          <small style="color:var(--muted);">VLM scanning active-span windows independently</small>
+        </div>
+        <div class="arch-box" style="border-color:var(--accent3);">
+          <strong style="color:var(--accent3);">Layer 3</strong><br>
+          <small style="color:var(--muted);">Qwen verify + fusion</small>
+        </div>
+      </div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-box" style="border-color:var(--accent2); color:var(--accent2); font-weight:600;">
+        predictions.csv &nbsp;·&nbsp; Two-pass shared evaluator
+      </div>
+    </div>
+    <div style="flex:0.85;">
+      <div class="card">
+        <h3>Architectural principles</h3>
+        <ul class="step-list">
+          <li><div class="step-num">1</div><span>Layer 0 builds trustworthy ground truth</span></li>
+          <li><div class="step-num">2</div><span>Candidates are <em>containers</em>, never predictions</span></li>
+          <li><div class="step-num">3</div><span>Track A (deterministic) and Track B (learned) are independent baselines</span></li>
+          <li><div class="step-num">4</div><span>Layer 2 VLM gets no Layer 1 hints</span></li>
+          <li><div class="step-num">5</div><span>One shared evaluator for all systems</span></li>
+          <li><div class="step-num">6</div><span>All systems preserve temporal order</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 6: LAYER 0A ════════════ -->
+<div class="slide">
+  <h2>Layer 0A — Person Triage &amp; Active Spans</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card" style="border-color:var(--accent);">
+        <h3>Goal</h3>
+        <p>Answer three questions without detecting any events:</p>
+        <ul style="margin-top:8px;">
+          <li>Is this clip technically usable?</li>
+          <li>Does it contain a person?</li>
+          <li>When is any person visible? (active spans)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Algorithms</h3>
+        <ul>
+          <li><strong>YOLO11n</strong> — lightweight person detector</li>
+          <li><strong>ByteTrack</strong> — multi-object tracking</li>
+          <li>Sampled at <strong>1 FPS</strong> (stride 20 on 20 FPS source)</li>
+          <li><code>vid_stride = max(1, round(source_fps / target_fps))</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Stable-track rule</h3>
+        <pre>PERSON_PRESENT when:
+  duration  ≥ 0.75 s (source timestamps)
+  confident observations ≥ 2
+  not isolated accidental detection</pre>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card" style="border-color:var(--accent2);">
+        <h3>Run statistics (20260622)</h3>
+        <table>
+          <tr><th>Metric</th><th>Value</th></tr>
+          <tr><td>Video resolution</td><td>3840 × 2160 (4K)</td></tr>
+          <tr><td>Source FPS</td><td>20.0</td></tr>
+          <tr><td>Frames in sample clip</td><td>286</td></tr>
+          <tr><td>Samples at 1 FPS</td><td>15 frames</td></tr>
+          <tr><td>Device</td><td>CPU (CUDA unavailable locally)</td></tr>
+          <tr><td>Stable tracks found</td><td>0 (no-person clip)</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Outputs</h3>
+        <ul>
+          <li><code>tracks_person.parquet</code> — timestamped bboxes + confidence</li>
+          <li><code>active_spans.parquet</code> — [t_start, t_end] per clip</li>
+          <li><code>clips.parquet</code> — manifest with has_person, usable, decode_ok</li>
+          <li><code>triage_sampling_report.parquet</code> — QA decisions</li>
+          <li>Triage preview MP4 at 1280×720 (1 FPS)</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color:var(--accent2);">
+        <h3 style="color:var(--accent2);">Key metric</h3>
+        <p>Person-containing clip <strong>recall</strong> — missing a person is worse than a false alarm</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 7: LAYER 0B ════════════ -->
+<div class="slide">
+  <h2>Layer 0B — Pose Tracking &amp; Interaction Proposals</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card" style="border-color:var(--accent2);">
+        <h3>Goal</h3>
+        <p>For each active span, find when a tracked person's wrist is likely interacting with a shelf. Produces high-recall candidates — <strong>not</strong> event predictions.</p>
+      </div>
+      <div class="card">
+        <h3>Algorithms</h3>
+        <ul>
+          <li><strong>YOLO Pose</strong> — 17-keypoint body pose estimation</li>
+          <li>Wrist keypoints tracked per actor at <strong>~8 FPS</strong> (stride 2)</li>
+          <li>Actual effective sample rate: <code>8.04 FPS</code></li>
+          <li>Actor association via IoU between person bbox and pose bbox</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Fixed shelf regions (store_camera_01)</h3>
+        <p>3 shelf/surface polygons configured and version-controlled. Expansion margin: 60 px. Clamped to 3840×2160 frame bounds.</p>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card" style="border-color:var(--accent2);">
+        <h3>Pipeline results — 75 processed clips</h3>
+        <div class="metric-row" style="flex-wrap:wrap;">
+          <div class="metric-box">
+            <div class="metric-val green">1,527</div>
+            <div class="metric-label">Total candidates</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-val">42 / 75</div>
+            <div class="metric-label">Clips with candidates</div>
+          </div>
+        </div>
+        <table style="margin-top:10px;">
+          <tr><th>Metric</th><th>Value</th></tr>
+          <tr><td>Avg candidates / clip</td><td>36.4 (among non-zero)</td></tr>
+          <tr><td>Max candidates / clip</td><td>168</td></tr>
+          <tr><td>Avg candidate duration</td><td>6.92 s</td></tr>
+          <tr><td>Median duration</td><td>5.15 s</td></tr>
+          <tr><td>Total candidate video</td><td>176 min (~2.9 h)</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Candidate generation config</h3>
+        <pre style="font-size:0.82rem;">target_fps:                   8
+min_wrist_confidence:         0.30
+min_interaction_duration_s:   0.25
+merge_gap_s:                  1.0
+context_before_s:             2.0
+context_after_s:              2.0
+max_candidate_duration_s:    10.0</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 8: ANNOTATION PIPELINE ════════════ -->
+<div class="slide">
+  <h2>Annotation Pipeline (Tasks 6, 6.1, 6.2)</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card">
+        <h3>End-to-end flow</h3>
+        <ol class="step-list">
+          <li><div class="step-num">1</div><span><strong>Task 6.1:</strong> process source videos on GPU (parallel Stage 1) + encode candidates to H.264 MP4 (CPU Stage 2) → upload to <code>s3://chillnbite-cameras/anon/candidates/</code></span></li>
+          <li><div class="step-num">2</div><span><strong>Task 6.2:</strong> sync candidate metadata from S3, build Label Studio task JSON with source-timing fields preserved</span></li>
+          <li><div class="step-num">3</div><span>Import tasks into Label Studio, annotate via S3 cloud storage (no local download needed)</span></li>
+          <li><div class="step-num">4</div><span>Export annotations → convert candidate-relative timestamps → source-video timestamps</span></li>
+        </ol>
+      </div>
+      <div class="card" style="border-color:var(--yellow);">
+        <h3>Timestamp conversion (Task 6.2)</h3>
+        <pre>source_timestamp =
+  source_start_s
+  + candidate_relative_timestamp</pre>
+        <p style="margin-top:6px; font-size:0.88rem; color:var(--muted);">Events annotated on the candidate clip are automatically mapped back to the original source-video timeline.</p>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card" style="border-color:var(--accent2);">
+        <h3>Processing pipeline stats (sessions Jun 22–23)</h3>
+        <table>
+          <tr><th>State</th><th>Count</th></tr>
+          <tr><td>Total in ledger</td><td>88</td></tr>
+          <tr><td style="color:var(--accent2);">Completed (generated=true)</td><td style="color:var(--accent2);">75</td></tr>
+          <tr><td style="color:var(--yellow);">Ready for processing</td><td style="color:var(--yellow);">13</td></tr>
+          <tr><td style="color:var(--accent3);">Permanently skipped</td><td style="color:var(--accent3);">21</td></tr>
+          <tr><td>GPU workers</td><td>8 (parallel)</td></tr>
+          <tr><td>Encode workers</td><td>12 (parallel)</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Pilot annotation setup</h3>
+        <table>
+          <tr><th>Item</th><th>Value</th></tr>
+          <tr><td>Pilot tasks generated</td><td>40 candidates</td></tr>
+          <tr><td>Unique source clips</td><td>24</td></tr>
+          <tr><td>Assigned annotator</td><td>galya</td></tr>
+          <tr><td>Avg candidate duration</td><td>9.61 s</td></tr>
+          <tr><td>Pilot overlap flag</td><td>true (all 40)</td></tr>
+          <tr><td>Status</td><td>Ready in Label Studio</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 9: EVALUATOR (TASK 8) ════════════ -->
+<div class="slide">
+  <h2>Task 8 — Shared Two-Pass Temporal Evaluator</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card" style="border-color:var(--accent);">
+        <h3>Pass 1 — Class-aware matching</h3>
+        <p>For each clip and event type, match predictions to ground truth <em>of the same type</em> using Hungarian assignment.</p>
+        <pre style="margin-top:10px; font-size:0.82rem;">Match criterion (either):
+  tIoU ≥ 0.3  or  ≥ 0.5
+  midpoint within ±1 second
+
+→ Precision / Recall / F1 per class</pre>
+      </div>
+      <div class="card" style="border-color:var(--accent3);">
+        <h3>Pass 2 — Class-agnostic confusion</h3>
+        <p>Match ignoring type, then compare types after matching:</p>
+        <pre style="font-size:0.82rem;">GT pickup  + pred pickup  → correct
+GT pickup  + pred putdown → CONFUSION
+GT putdown + pred pickup  → CONFUSION
+GT putdown + pred putdown → correct</pre>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h3>Required metrics</h3>
+        <ul>
+          <li>Precision / Recall / F1 at tIoU 0.3 and 0.5</li>
+          <li>F1 at midpoint tolerance ±1 s</li>
+          <li>pickup→putdown confusion rate</li>
+          <li>putdown→pickup confusion rate</li>
+          <li>Start / end time MAE</li>
+          <li>False positives per video-hour</li>
+          <li>Stage B proposal recall</li>
+          <li>Multi-item event recall</li>
+          <li>mAP at selected tIoU thresholds (optional)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Evaluation slices</h3>
+        <ul>
+          <li>All official event rows</li>
+          <li>High/med confidence only</li>
+          <li>Low confidence only</li>
+          <li>Normal vs <code>hard_case=true</code></li>
+          <li>Single-person vs multi-person</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color:var(--accent2);">
+        <h3 style="color:var(--accent2);">One evaluator — all systems</h3>
+        <p>Track A, Track B1, Track B2, Layer 2 (Qwen standalone), and Layer 3 (fusion) all run through the same evaluator, enabling a fair head-to-head comparison.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 10: DEFINITIONS ════════════ -->
+<div class="slide">
+  <h2>Precise Event Definitions</h2>
+  <div class="row" style="gap:24px;">
+    <div class="col">
+      <div class="card" style="border-color:var(--accent2);">
+        <h3 style="color:var(--accent2);">Pickup</h3>
+        <p>A person <strong>removes an item from a shelf or surface</strong> and takes it into their hand(s), so that the item <em>leaves its resting place</em> and is carried or held.</p>
+        <pre style="margin-top:10px;">Transition: shelf/surface → hand
+t_start: onset of final purposeful action
+t_end:   item stably held/carried</pre>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card" style="border-color:var(--accent3);">
+        <h3 style="color:var(--accent3);">Putdown</h3>
+        <p>A person <strong>places an item they were holding onto a shelf or surface</strong> and releases it so that it rests there again.</p>
+        <pre style="margin-top:10px;">Transition: hand → shelf/surface
+t_start: onset of final purposeful action
+t_end:   item released &amp; stably resting</pre>
+      </div>
+    </div>
+  </div>
+  <div class="row" style="gap:24px; margin-top:14px;">
+    <div class="col">
+      <div class="card">
+        <h3>Hard negatives (NOT events)</h3>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+          <span class="tag tag-red">Touching without removing</span>
+          <span class="tag tag-red">Reaching past / browsing</span>
+          <span class="tag tag-red">Standing near shelves</span>
+          <span class="tag tag-red">Restocking (new goods)</span>
+          <span class="tag tag-red">Occluded actions</span>
+          <span class="tag tag-red">Empty / no-person clips</span>
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h3>Edge-case rules</h3>
+        <ul>
+          <li>Two items simultaneously → <strong>two event rows</strong></li>
+          <li>Pickup then immediate return → <strong>two ordered events</strong></li>
+          <li>Occluded / out-of-frame → <strong>ignore interval</strong> (not labeled)</li>
+          <li>Multiple actors → <strong>all labeled</strong></li>
+          <li>Ambiguous but visible → keep with <code>confidence=low</code></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 11: TRACK A ════════════ -->
+<div class="slide">
+  <h2>Layer 1 Track A — Deterministic State Machine</h2>
+  <div class="row" style="gap:24px;">
+    <div class="col">
+      <div class="card" style="border-color:var(--accent4);">
+        <h3>Philosophy</h3>
+        <p>No learned weights for core detection. Combines geometric pose evidence with lightweight appearance classifiers and a repeating finite state machine.</p>
+      </div>
+      <div class="card">
+        <h3>State machine</h3>
+        <pre>OUTSIDE
+  → APPROACHING
+  → CONTACT
+  → TRANSFER / STABILIZATION
+  → WITHDRAWING
+  → OUTSIDE  (→ can repeat)</pre>
+        <p style="margin-top:8px; font-size:0.9rem; color:var(--muted);">One candidate can cycle multiple times → multiple events.</p>
+      </div>
+      <div class="card">
+        <h3>Decision rules</h3>
+        <p><strong>Pickup:</strong> hand approaches + transfer visible + hand becomes carrying + shelf indicates removal</p>
+        <p style="margin-top:6px;"><strong>Putdown:</strong> hand approaches while carrying + hand becomes empty + shelf indicates placement</p>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h3>Appearance features (per transition)</h3>
+        <p>Three frames sampled: pre-contact · contact/transfer · post-stabilization</p>
+        <ul style="margin-top:8px;">
+          <li><code>hand_before</code> / <code>hand_after</code> crops</li>
+          <li><code>shelf_before</code> / <code>shelf_after</code> local patches</li>
+          <li>Frozen embeddings: <strong>DINOv2-small</strong> / SigLIP / CLIP</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Lightweight classifiers</h3>
+        <div class="row" style="gap:10px; margin-top:6px;">
+          <div class="card" style="flex:1; padding:10px;">
+            <div class="label">Hand state</div>
+            <code>empty | carrying | uncertain</code>
+          </div>
+          <div class="card" style="flex:1; padding:10px;">
+            <div class="label">Shelf transition</div>
+            <code>removed | placed | unchanged | uncertain</code>
+          </div>
+        </div>
+        <p style="margin-top:8px; font-size:0.9rem;">Models: logistic regression, small MLP, or gradient-boosted trees.</p>
+      </div>
+      <div class="card">
+        <h3>Boundary method tracking</h3>
+        <p>If precise transfer boundaries can't be estimated, fallback is recorded:</p>
+        <pre>boundary_method = WRIST_REGION_FALLBACK</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 12: TRACK B1 ════════════ -->
+<div class="slide">
+  <h2>Layer 1 Track B1 — VideoMAE Window Classifier</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card" style="border-color:var(--accent4);">
+        <h3>Model: VideoMAE-Small</h3>
+        <p>Masked video autoencoder pretrained on Kinetics. Classification head fine-tuned on actor-conditioned windows from our dataset.</p>
+      </div>
+      <div class="card">
+        <h3>Actor-conditioned crop</h3>
+        <pre>crop = union(actor bboxes across window)
+       + active shelf/surface region
+       + 15–20% margin
+
+→ simultaneous people processed
+  independently (no cross-person leakage)</pre>
+      </div>
+      <div class="card">
+        <h3>Window parameters</h3>
+        <pre>window duration:  2.5 s
+stride:           0.5 s
+sampled frames:   16 (chronological)
+classes:          background | pickup | putdown</pre>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h3>Training gates</h3>
+        <ol style="margin-top:6px;">
+          <li><strong>Gate A:</strong> visual inspection — render 20+ samples with frames, crop box, label, timestamps</li>
+          <li><strong>Gate B:</strong> tiny overfit — overfit 8–16 samples before full training</li>
+          <li><strong>Gate C:</strong> baseline — frozen backbone + trained head; checkpoint by validation event F1</li>
+        </ol>
+      </div>
+      <div class="card">
+        <h3>Inference &amp; decoding</h3>
+        <ol style="margin-top:6px; font-size:0.9rem;">
+          <li>Slide window with 0.5 s stride</li>
+          <li>Smooth class probabilities chronologically</li>
+          <li>Detect distinct per-class peaks</li>
+          <li>Merge only same-type duplicates</li>
+          <li><strong>Never merge adjacent pickup ↔ putdown</strong></li>
+          <li>Export canonical event intervals</li>
+        </ol>
+      </div>
+      <div class="card" style="border-color:var(--accent3);">
+        <h3 style="color:var(--accent3);">Critical constraint</h3>
+        <p>Frames must always be in <strong>chronological order</strong>. An unordered bag of frames cannot distinguish pickup from putdown.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 13: TRACK B2 ════════════ -->
+<div class="slide">
+  <h2>Layer 1 Track B2 — Cached Features + TCN</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card">
+        <h3>Two-stage design</h3>
+        <div class="arch-box" style="border-color:var(--accent4); margin:10px 0; text-align:left; padding:10px 14px;">
+          <strong>Stage 1 (GPU — run once)</strong><br>
+          <small style="color:var(--muted);">VideoMAE-Small encodes overlapping 2 s micro-clips → cached embeddings [T, D]</small>
+        </div>
+        <div class="arch-arrow">↓ cached as .npz per actor/candidate</div>
+        <div class="arch-box" style="border-color:var(--accent2); text-align:left; padding:10px 14px;">
+          <strong>Stage 2 (CPU — fast iteration)</strong><br>
+          <small style="color:var(--muted);">Small TCN trained on cached features → per-timestep class scores</small>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Why cache?</h3>
+        <p>Feature extraction is expensive GPU work. Once cached, many temporal-head experiments run on CPU in minutes — enabling rapid iteration without re-running VideoMAE.</p>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h3>TCN architecture</h3>
+        <pre>VideoMAE sequence [T × D]
+        ↓
+Linear projection → 256d
+        ↓
+Conv1D residual block (k=3)
+        ↓
+Dilated Conv1D block (d=2)
+        ↓
+Dilated Conv1D block (d=4)
+        ↓
+Per-timestep: background | pickup | putdown</pre>
+      </div>
+      <div class="card">
+        <h3>Temporal label assignment</h3>
+        <ul>
+          <li>Center inside pickup interval → <code>pickup</code></li>
+          <li>Center inside putdown interval → <code>putdown</code></li>
+          <li>Inside ignore interval → <code>ignore</code> (loss = 0)</li>
+          <li>Otherwise → <code>background</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Loss &amp; confidence weights</h3>
+        <pre>Focal loss / weighted cross-entropy
+high/med confidence:  weight = 1.0
+low confidence:       weight = 0.5
+ignore interval:      weight = 0.0</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 14: LAYER 2 ════════════ -->
+<div class="slide">
+  <h2>Layer 2 — Standalone Qwen3.6-27B VLM Detector</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card" style="border-color:var(--yellow);">
+        <h3 style="color:var(--yellow);">Independence constraint</h3>
+        <p>Layer 2 must <strong>not</strong> receive Layer 1 predictions. It scans active-span windows independently, enabling a fair comparison.</p>
+      </div>
+      <div class="card">
+        <h3>Input windows</h3>
+        <pre>duration:    8.0 s
+stride:      4.0 s (50% overlap)
+sampling:    4 FPS → 32 frames/window
+
+Each window:
+  - chronological video frames
+  - frame numbers + relative timestamps
+  - clip_id + window start time</pre>
+      </div>
+      <div class="card">
+        <h3>Structured JSON response</h3>
+        <pre style="font-size:0.82rem;">{
+  "events": [{
+    "type": "pickup",
+    "t_start": 2.4,
+    "t_end": 3.7,
+    "item_count": 1,
+    "visible": true,
+    "confidence": 0.82
+  }]
+}</pre>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h3>Post-processing</h3>
+        <ul>
+          <li>Pydantic schema validation (retry once on failure)</li>
+          <li>Convert relative window times → source clip times</li>
+          <li>Merge only <strong>same-type</strong> overlapping predictions from adjacent windows</li>
+          <li>Expand <code>item_count=2</code> into two canonical rows</li>
+          <li>Raw responses preserved in <code>raw_responses.jsonl</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Prompt must include</h3>
+        <ul>
+          <li>Full operational event definitions</li>
+          <li>Edge-case rules (two items, immediate pickup/putdown)</li>
+          <li>Negative examples (touch-only, restocking)</li>
+          <li>Temporal-order instruction</li>
+          <li>Strict JSON schema</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Hardware logged per run</h3>
+        <p>Model ID, quantization, GPU, peak VRAM, inference speed, and parse failure rate are all recorded for reproducibility.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 15: LAYER 3 ════════════ -->
+<div class="slide">
+  <h2>Layer 3 — Qwen Verification &amp; Deterministic Fusion</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card">
+        <h3>Purpose</h3>
+        <p>For each Layer 1 event prediction, send a short context clip to Qwen and ask it to verify the event. Layer 1 provides timing; Qwen provides semantic confirmation.</p>
+      </div>
+      <div class="card">
+        <h3>Verification window</h3>
+        <pre>4 s before Layer 1 t_start
+        through
+2 s after Layer 1 t_end</pre>
+        <p style="margin-top:8px; font-size:0.9rem;">Pre-context distinguishes genuine putdown (item was held) from restocking (item is new).</p>
+      </div>
+      <div class="card">
+        <h3>Verification response</h3>
+        <pre style="font-size:0.82rem;">{
+  "event_visible": true,
+  "event_present": true,
+  "event_type": "pickup",
+  "item_count": 1,
+  "confidence": 0.91,
+  "reason_code": "ITEM_LEAVES_SURFACE_WITH_HAND"
+}</pre>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card" style="border-color:var(--accent3);">
+        <h3>Deterministic fusion rules</h3>
+        <table>
+          <tr><th>Qwen verdict</th><th>Action</th></tr>
+          <tr><td><code>visible=false</code></td><td>REJECTED_NOT_VISIBLE</td></tr>
+          <tr><td><code>event_present=false</code></td><td>REJECTED_NO_EVENT</td></tr>
+          <tr><td>Type confirmed</td><td>ACCEPTED (Layer 1 timing kept)</td></tr>
+          <tr><td>Type changed</td><td>ACCEPTED_TYPE_CHANGED</td></tr>
+          <tr><td>Uncertain</td><td>NEEDS_REVIEW</td></tr>
+          <tr><td><code>item_count=2</code></td><td>Two canonical rows exported</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Reason codes</h3>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+          <span class="tag tag-green">ITEM_LEAVES_SURFACE_WITH_HAND</span>
+          <span class="tag tag-green">ITEM_RELEASED_ON_SURFACE</span>
+          <span class="tag tag-red">TOUCH_ONLY</span>
+          <span class="tag tag-red">NO_OBJECT_TRANSFER</span>
+          <span class="tag tag-red">RESTOCKING_NOT_PUTDOWN</span>
+          <span class="tag tag-yellow">ACTION_OCCLUDED</span>
+          <span class="tag tag-yellow">AMBIGUOUS</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 16: TECH STACK ════════════ -->
+<div class="slide">
+  <h2>Technology Stack</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card">
+        <h3>Core CV / ML</h3>
+        <ul>
+          <li><strong>Ultralytics YOLO11n</strong> — person detection (Layer 0A)</li>
+          <li><strong>YOLO Pose</strong> — 17-keypoint pose (Layer 0B)</li>
+          <li><strong>ByteTrack</strong> — multi-object tracking</li>
+          <li><strong>VideoMAE-Small</strong> — video foundation model (Tracks B1, B2)</li>
+          <li><strong>DINOv2-small / SigLIP / CLIP</strong> — frozen image features (Track A)</li>
+          <li><strong>Qwen3.6-27B</strong> — VLM (Layers 2 &amp; 3)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Lightweight classifiers (Track A)</h3>
+        <ul>
+          <li>scikit-learn: logistic regression, MLP</li>
+          <li>XGBoost for gradient-boosted trees</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Hardware strategy</h3>
+        <div style="display:flex; gap:10px; margin-top:6px;">
+          <div style="flex:1; text-align:center; padding:10px; background:var(--surface2); border-radius:8px;">
+            <div style="font-size:1.4rem;">💻</div>
+            <div style="font-size:0.83rem; margin-top:4px;"><strong>CPU / Laptop</strong><br><span style="color:var(--muted);">Track A · TCN · Evaluation · Annotation</span></div>
+          </div>
+          <div style="flex:1; text-align:center; padding:10px; background:var(--surface2); border-radius:8px;">
+            <div style="font-size:1.4rem;">⚡</div>
+            <div style="font-size:0.83rem; margin-top:4px;"><strong>GPU bursts</strong><br><span style="color:var(--muted);">YOLO · VideoMAE features · Track B1</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h3>Engineering</h3>
+        <ul>
+          <li><strong>Python 3.13</strong> + uv + pyproject.toml</li>
+          <li><strong>PyTorch</strong> + Hugging Face Transformers</li>
+          <li><strong>Pydantic</strong> — schema validation throughout</li>
+          <li><strong>Typer</strong> — CLI (<code>pickup-putdown &lt;command&gt;</code>)</li>
+          <li><strong>PyArrow / Parquet</strong> — intermediate storage</li>
+          <li><strong>FFmpeg / ffprobe</strong> — video metadata + encoding</li>
+          <li><strong>OpenCV</strong> — frame processing + preview rendering</li>
+          <li><strong>Label Studio</strong> — annotation tool</li>
+          <li><strong>AWS S3</strong> — source video bucket (<code>chillnbite-cameras</code>)</li>
+          <li><strong>pytest</strong> — 20+ test files with fixtures</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>CLI commands implemented</h3>
+        <pre style="font-size:0.8rem;">pickup-putdown index
+pickup-putdown triage
+pickup-putdown propose
+pickup-putdown annotation-build-tasks
+pickup-putdown annotation-export
+pickup-putdown annotation-validate
+pickup-putdown candidates-process-local
+pickup-putdown candidates-upload
+pickup-putdown evaluate</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 17: MODEL COMPARISON ════════════ -->
+<div class="slide">
+  <h2>Model Comparison at a Glance</h2>
+  <table style="margin-top: 10px;">
+    <tr>
+      <th>System</th>
+      <th>Type</th>
+      <th>Input</th>
+      <th>Key model(s)</th>
+      <th>Training</th>
+      <th>Strengths</th>
+    </tr>
+    <tr>
+      <td><strong style="color:var(--accent4);">Track A</strong></td>
+      <td>Deterministic</td>
+      <td>Pose + wrist tracks</td>
+      <td>DINOv2 + log. reg.</td>
+      <td>Small (classifiers only)</td>
+      <td>Interpretable, no GPU training, explicit temporal logic</td>
+    </tr>
+    <tr>
+      <td><strong style="color:var(--accent4);">Track B1</strong></td>
+      <td>Learned</td>
+      <td>Actor-conditioned video windows</td>
+      <td>VideoMAE-Small</td>
+      <td>Yes (fine-tune head)</td>
+      <td>Captures complex motion, end-to-end from video</td>
+    </tr>
+    <tr>
+      <td><strong style="color:var(--accent4);">Track B2</strong></td>
+      <td>Learned</td>
+      <td>Cached VideoMAE features</td>
+      <td>VideoMAE + TCN</td>
+      <td>Yes (TCN only, fast)</td>
+      <td>Best temporal localization, separable training</td>
+    </tr>
+    <tr>
+      <td><strong style="color:var(--yellow);">Layer 2</strong></td>
+      <td>VLM</td>
+      <td>Active-span video frames</td>
+      <td>Qwen3.6-27B</td>
+      <td>No (zero-shot)</td>
+      <td>Semantic understanding, handles novel scenarios</td>
+    </tr>
+    <tr>
+      <td><strong style="color:var(--accent3);">Layer 3</strong></td>
+      <td>Fusion</td>
+      <td>Layer 1 event + context clip</td>
+      <td>Qwen3.6-27B (verifier)</td>
+      <td>No</td>
+      <td>Reduces Layer 1 FPs, resolves type ambiguity</td>
+    </tr>
+  </table>
+  <div class="card" style="margin-top:16px; border-color:var(--accent);">
+    <p><strong>All five systems are evaluated with the same two-pass evaluator</strong> on the same frozen test set — enabling a fair head-to-head comparison of deterministic, learned, and VLM-based approaches.</p>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 18: PROCESSING FAILURES ════════════ -->
+<div class="slide">
+  <h2>Processing Challenges &amp; Failure Analysis</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card" style="border-color:var(--accent3);">
+        <h3>Primary failure mode</h3>
+        <p>Worker timeout during Task 3 triage on <strong>longer clips</strong> (&gt;300 s). The frame-queue worker times out waiting for frames during the parallel pipeline.</p>
+        <pre style="margin-top:8px; font-size:0.82rem;">RuntimeError: Worker 0/1 error:
+  Worker 0/1: timeout
+
+Affected clips: May 22–26
+Pattern: all longer-duration videos</pre>
+      </div>
+      <div class="card">
+        <h3>Processing sessions summary (Jun 22–23)</h3>
+        <table>
+          <tr><th>Session</th><th>Completed</th><th>Failed</th><th>Candidates</th></tr>
+          <tr><td>Sessions 1–2</td><td>0</td><td>0</td><td>0</td></tr>
+          <tr><td>Session 3</td><td>12</td><td>10</td><td>323</td></tr>
+          <tr><td>Session 4</td><td>11</td><td>48</td><td>137</td></tr>
+          <tr><td>Sessions 5–7</td><td>~8</td><td>~70</td><td>85</td></tr>
+          <tr><td>Session 8 (final)</td><td>28</td><td>58</td><td>628</td></tr>
+          <tr><td><strong>Total</strong></td><td><strong>75</strong></td><td><strong>skipped: 21</strong></td><td><strong>1,527</strong></td></tr>
+        </table>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h3>Remaining 13 unprocessed clips</h3>
+        <p style="font-size:0.88rem; color:var(--muted); margin-bottom:8px;">All are longer May 22–26 clips hitting the same timeout:</p>
+        <table style="font-size:0.82rem;">
+          <tr><th>Status</th><th>Count</th></tr>
+          <tr><td style="color:var(--accent3);">Permanently skipped (3+ retries)</td><td>5</td></tr>
+          <tr><td style="color:var(--yellow);">Worker timeout — retry possible</td><td>6</td></tr>
+          <tr><td style="color:var(--yellow);">In failed-JSON retry tracker</td><td>2</td></tr>
+        </table>
+      </div>
+      <div class="card" style="border-color:var(--accent2);">
+        <h3>Mitigation options</h3>
+        <ul>
+          <li>Fix frame-queue worker timeout threshold</li>
+          <li>Remove clips from skip list and retry</li>
+          <li>Process longer clips on GPU with more memory</li>
+          <li>Split longer clips before triage</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>What succeeded</h3>
+        <ul>
+          <li>Parallel GPU Stage 1 + CPU Stage 2 pipeline works correctly</li>
+          <li>H.264 encoding and S3 upload reliable</li>
+          <li>Metadata generation and ledger tracking accurate</li>
+          <li>Label Studio task generation from S3 metadata works end-to-end</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 19: REPRODUCIBILITY ════════════ -->
+<div class="slide">
+  <h2>Reproducibility &amp; Privacy</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card" style="border-color:var(--accent2);">
+        <h3>Every run records</h3>
+        <pre style="font-size:0.85rem;">{
+  "run_id":          "20260622_184923",
+  "git_commit":      "abc1234",
+  "dataset_version": "manifest_v3",
+  "split_version":   "split_v1",
+  "config":          "configs/track_b2.yaml",
+  "seed":            42,
+  "model":           "videomae-small-tcn"
+}</pre>
+      </div>
+      <div class="card">
+        <h3>One-command reproduction</h3>
+        <pre>make tasks-3-5 VIDEO=/path/to/video.mp4</pre>
+        <p style="font-size:0.88rem; color:var(--muted); margin-top:6px;">Creates a dated run directory with all Layer 0A–0B artifacts under <code>.local/task_runs/&lt;timestamp&gt;/</code></p>
+      </div>
+      <div class="card">
+        <h3>Rules</h3>
+        <ul>
+          <li>Fix random seeds everywhere</li>
+          <li>Version datasets immutably</li>
+          <li>Never silently overwrite manifests</li>
+          <li>Preserve raw predictions before fusion</li>
+        </ul>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card" style="border-color:var(--accent3);">
+        <h3>Privacy constraints</h3>
+        <ul>
+          <li>No face identification or recognition</li>
+          <li>Clip-local track IDs only (e.g., <code>track_3</code>)</li>
+          <li>Footage in controlled S3 bucket only</li>
+          <li>Do not redistribute source clips</li>
+          <li>Blur faces in reports and presentations</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Git security</h3>
+        <ul>
+          <li><code>.env</code>, <code>*.mp4</code>, <code>*.pt</code>, <code>data/</code>, <code>.local/</code> — all gitignored</li>
+          <li>AWS credentials in <code>.local/env/storage.env</code> (user-only permissions)</li>
+          <li>No credentials ever committed</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Run output layout</h3>
+        <pre style="font-size:0.8rem;">.local/task_runs/&lt;timestamp&gt;/
+├── task_3/
+│   ├── tracks_person.parquet
+│   ├── active_spans.parquet
+│   ├── clips.parquet
+│   ├── triage_sampling_report.parquet
+│   └── triage_previews/
+├── task_4/
+│   └── shelf_validation.json
+└── task_5/
+    ├── tracks_pose.parquet
+    ├── candidates.parquet
+    └── candidate_previews/</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 20: NEXT STEPS ════════════ -->
+<div class="slide">
+  <h2>Next Steps — Critical Path</h2>
+  <div class="row" style="gap:24px; align-items:flex-start;">
+    <div class="col">
+      <div class="card" style="border-color:var(--yellow);">
+        <h3 style="color:var(--yellow);">Immediate — Annotation (Task 7)</h3>
+        <ol class="step-list">
+          <li><div class="step-num">1</div><span>Complete pilot annotation (40 candidates in Label Studio)</span></li>
+          <li><div class="step-num">2</div><span>Align on labeling guidelines — verify edge cases as a team</span></li>
+          <li><div class="step-num">3</div><span>Scale to target budget: 100 pickups + 100 putdowns + 200 hard negatives</span></li>
+          <li><div class="step-num">4</div><span>Double-label 15% for agreement check</span></li>
+          <li><div class="step-num">5</div><span>Freeze test split by recording session before any model tuning</span></li>
+        </ol>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h3>Track A (Tasks 9 + 10)</h3>
+        <ul>
+          <li>Extract pre/contact/post crops from annotated candidates</li>
+          <li>Train hand-state and shelf-transition classifiers</li>
+          <li>Implement repeating state machine</li>
+          <li>First non-VLM event predictions</li>
+        </ul>
+      </div>
+      <div class="card" style="margin-top:12px;">
+        <h3>Track B1 (Task 12)</h3>
+        <ul>
+          <li>Build actor-conditioned window dataset</li>
+          <li>Fine-tune VideoMAE-Small classification head</li>
+          <li>Validate with tiny-overfit gate first</li>
+          <li>Compare vs Track A on validation set</li>
+        </ul>
+      </div>
+      <div class="card" style="margin-top:12px;">
+        <h3>Layer 2 (Task 14)</h3>
+        <ul>
+          <li>Implement Qwen3.6-27B sliding-window scanner</li>
+          <li>Must remain fully independent of Layer 1</li>
+          <li>Compare with both Track A and Track B on same test set</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ SLIDE 21: SUMMARY ════════════ -->
+<div class="slide">
+  <h2>Summary</h2>
+  <div class="row" style="gap:24px;">
+    <div class="col">
+      <div class="card" style="border-color:var(--accent2);">
+        <h3>What we built so far</h3>
+        <ul class="step-list">
+          <li><div class="step-num">✓</div><span>End-to-end ingestion pipeline: S3 → index → triage → proposals → candidates → Label Studio</span></li>
+          <li><div class="step-num">✓</div><span>1,527 interaction candidates from 4.93 h of 4K retail video (5 recording days)</span></li>
+          <li><div class="step-num">✓</div><span>Parallel GPU/CPU candidate generation with S3 upload and ledger tracking</span></li>
+          <li><div class="step-num">✓</div><span>Production annotation workflow bridging S3 ↔ Label Studio ↔ source timestamps</span></li>
+          <li><div class="step-num">✓</div><span>Shared two-pass temporal evaluator ready for all models</span></li>
+          <li><div class="step-num">✓</div><span>Full architecture designed for 5 independent systems with head-to-head comparison</span></li>
+        </ul>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <h3>Critical design choices</h3>
+        <ul>
+          <li><strong>Temporal order is sacred</strong> — pickup and putdown are time-reverses; shuffle = failure</li>
+          <li><strong>Candidates ≠ predictions</strong> — proposals only guide annotation</li>
+          <li><strong>Actor conditioning</strong> — simultaneous shoppers processed independently</li>
+          <li><strong>Independent Layer 2</strong> — VLM gets no Layer 1 hints</li>
+          <li><strong>Session-level splits</strong> — prevents temporal leakage</li>
+        </ul>
+      </div>
+      <div class="card" style="margin-top:12px; border-color:var(--accent);">
+        <h3>Key numbers</h3>
+        <div class="metric-row">
+          <div class="metric-box">
+            <div class="metric-val">4.93 h</div>
+            <div class="metric-label">Video processed</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-val green">1,527</div>
+            <div class="metric-label">Candidates</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-val yellow">9 / 13</div>
+            <div class="metric-label">Tasks done</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-val">5</div>
+            <div class="metric-label">Models planned</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- end deck -->
+
+<div class="nav">
+  <button onclick="prevSlide()">← Prev</button>
+  <button onclick="nextSlide()">Next →</button>
+</div>
+<div class="progress" id="progress">1 / 21</div>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  let current = 0;
+
+  function show(n) {
+    slides[current].classList.remove('active');
+    current = (n + slides.length) % slides.length;
+    slides[current].classList.add('active');
+    document.getElementById('progress').textContent = `${current + 1} / ${slides.length}`;
+  }
+
+  function nextSlide() { show(current + 1); }
+  function prevSlide() { show(current - 1); }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') { e.preventDefault(); nextSlide(); }
+    if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')                    { e.preventDefault(); prevSlide(); }
+  });
+</script>
+</body>
+</html>
