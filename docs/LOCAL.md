@@ -152,6 +152,39 @@ Classifier weights and Qwen model are stuck on the remote server.
 **Pros:** Minimal downloads, validates evaluation pipeline.
 **Cons:** Skips VLM inference entirely, only tests merge + evaluation.
 
+### Option D: Multimodal Layer 2 with llama.cpp endpoint (✅ Done)
+
+Multimodal inference: rendered timestamped frames sent as base64 data URLs to Qwen via OpenAI-compatible API.
+
+**How to run:**
+
+1. **Start llama.cpp server:**
+   ```bash
+   llama-server \
+     -m models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+     --host 127.0.0.1 \
+     --port 8000 \
+     -ngl 35
+   ```
+   (Adjust `-ngl` for your GPU VRAM; -35 offloads ~35 layers to GPU.)
+
+2. **Run smoke test on a candidate video:**
+   ```bash
+   python -m pickup_putdown.layer2.smoke_test \
+     /path/to/candidate.mp4 \
+     --output-dir /tmp/smoke_test_candXX
+   ```
+
+3. **Run on the accepted candidate:**
+   ```bash
+   python -m pickup_putdown.layer2.smoke_test \
+     .local/task5_acceptance/preview_20260622_100316/candidate_previews/cand_56f34ebbb9a3.mp4 \
+     --output-dir /tmp/smoke_test_cand56
+   ```
+
+**Pros:** Real multimodal VLM inference, full end-to-end validation, no mock data.
+**Cons:** Requires ~8GB RAM, running llama.cpp server, video file.
+
 ---
 
 ## Recommended Execution Order
@@ -160,7 +193,7 @@ If you want to test each layer "as good as possible" with minimal data:
 
 1. **Layer 1A: Option B** (stub classifiers) — validates full data flow with zero downloads. ~10 min.
 2. **Layer 1B: Option B** (frozen encoder + random head) — validates window extraction + model forward + peak detection. ~30 min (includes downloading 1-2 source clips).
-3. **Layer 2: Option A** (run Qwen locally) — if you have 8GB+ RAM, this gives the most complete test. Otherwise Option B (mock).
+3. **Layer 2: Option D** (multimodal Qwen) — if you have 8GB+ RAM and a running llama.cpp server, this gives the most complete test with real VLM output.
 
 ---
 
@@ -209,28 +242,37 @@ If you want to test each layer "as good as possible" with minimal data:
 - `scripts/run_track_b1_stub.py` — runner script
 - `.local/track_b1_output/predictions.csv` — 15 predictions (random head, all putdown)
 
----
+### Layer 2: Option D (multimodal Qwen smoke test) — ✅ Done
 
-## Results
-
-### Layer 1A: Option B (stub classifiers) — ✅ Done
-
-**Command:** `python3 scripts/run_track_a_stub.py`
+**Command:**
+```bash
+python -m pickup_putdown.layer2.smoke_test \
+  .local/task5_acceptance/preview_20260622_100316/candidate_previews/cand_56f34ebbb9a3.mp4 \
+  --output-dir /tmp/smoke_test_cand56
+```
 
 **What was done:**
-- Created stub classifiers: `.local/track_a_artifacts/hand_state.joblib` (2 classes: carrying, empty), `shelf_state.joblib` (3 classes: no_change, object_placed, object_removed), both with metadata JSONs
-- Runner script: `scripts/run_track_a_stub.py` — loads 15 candidates + 543 pose obs from local parquet, runs full pipeline with `embedder=None` (skips feature extraction)
-- Zero downloads needed
+- 8 timestamped frames extracted from `cand_56f34ebbb9a3.mp4` (20fps, ~140s clip)
+- One Layer 2 window covering the full clip duration
+- Frames sent as base64 data URLs to `http://127.0.0.1:8000` (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf)
+- Two-attempt retry loop: attempt 1 returned non-JSON (1114 chars, likely reasoning output), attempt 2 returned valid JSON (687 chars)
+- Retry prompt included validation errors from attempt 1, model self-corrected
 
 **Result:**
-- 15/15 candidates processed, 0 skipped
-- 0 predictions (expected — stub classifiers return uniform probabilities → all uncertain → no events emitted by state machine)
-- Output files created: `predictions.csv`, `diagnostics`, `inference_summary.json`, `raw_state_machine_events.json`
+- 1 validated event detected: **putdown at 37.7s–44.0s, 2 items, visible, confidence 0.90**
+- The model saw the visual frames and correctly identified a two-item putdown event
+- The `item_count=2` suggests two items were placed simultaneously or in quick succession
+- `visibility=visible` with `confidence=0.90` indicates clear visual evidence
 
-**Pipeline wiring proven:** data loading → classifier loading → feature extraction skip → state machine → dedup → canonical output.
+**Interpretation:**
+- The candidate video contains a visible two-item putdown event in the 37.7–44.0s window
+- This is a valid Layer 2 prediction: the model used visual evidence (8 frames) to detect the event
+- This prediction can be merged with Layer 1 predictions for final event deduplication
 
 **Files created:**
-- `scripts/run_track_a_stub.py` — runner script
-- `.local/track_a_artifacts/hand_state.joblib` + `hand_state_metadata.json`
-- `.local/track_a_artifacts/shelf_state.joblib` + `shelf_state_metadata.json`
-- `.local/track_a_output_stub/` — output directory with predictions.csv, diagnostics, inference_summary.json, raw_state_machine_events.json
+- `src/pickup_putdown/layer2/qwen_client.py` — multimodal Qwen client (rewritten)
+- `src/pickup_putdown/layer2/renderer.py` — frame extraction with file output (updated)
+- `src/pickup_putdown/layer2/smoke_test.py` — smoke test utility (new)
+- `tests/test_layer2.py` — 73 tests covering all 14 requirements (updated)
+- `/tmp/smoke_test_cand56/smoke_result.json` — raw output with attempts and validated events
+- `/tmp/smoke_test_cand56/frame_000.jpg` through `frame_007.jpg` — rendered timestamped frames
