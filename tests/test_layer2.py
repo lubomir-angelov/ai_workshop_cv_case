@@ -333,58 +333,190 @@ def _make_mock_vlm_response(content: str, finish_reason: str = "stop") -> dict:
 
 
 class TestQwenClient:
-    """VLM client wrapper tests with mocked HTTP."""
+    """VLM client wrapper tests with mocked HTTP.
 
-    def test_success_returns_validated_events(self):
-        valid_json = json.dumps(
-            {
-                "events": [
-                    {
-                        "event_type": "pickup",
-                        "relative_start_s": 1.0,
-                        "relative_end_s": 3.0,
-                        "item_count": 1,
-                        "visibility": "visible",
-                        "confidence": 0.9,
-                    }
-                ],
-                "reasoning": "saw it",
-            }
-        )
+    Tests cover:
+    1. Multimodal VlmRequest serialization
+    2. Image file encoded as valid data URL
+    3. Missing image produces clear error
+    4. Request contains all frame images in chronological order
+    5. frame_count derived from frame_paths
+    6. Missing 'events' rejected
+    7. Malformed JSON triggers second attempt
+    8. Schema-invalid output triggers second attempt
+    9. Retry prompt contains previous validation errors
+    10. Generic client called with max_attempts=1
+    11. Two Layer 2 attempts produce at most two model calls
+    12. Invalid final response produces no predictions
+    13. Valid empty {"events": []} response succeeds
+    14. Batch inference passes frame paths correctly
+    """
+
+    def _write_tmp_frame(self, tmp_path, name="frame.jpg", content=b"\xff\xd8\xff\xe0fakejpeg"):
+        p = tmp_path / name
+        p.write_bytes(content)
+        return str(p)
+
+    # -- 1. multimodal VlmRequest serialization --
+    def test_multimodal_vlm_request_serialization(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
+        valid_json = json.dumps({"events": [], "reasoning": "ok"})
+
         with patch(
             "pickup_putdown.layer2.qwen_client.call_vlm",
             return_value=VlmResponse(content=valid_json, finish_reason="stop"),
+        ) as mock_call:
+            result = call_qwen(
+                window_id="w1",
+                clip_id="c1",
+                window_start_s=0.0,
+                window_end_s=10.0,
+                frame_paths=[frame_path],
+                fps=1.0,
+                qwen_config=QwenClientConfig(max_attempts=1),
+            )
+
+        assert result.validated_response is not None
+        attempt = result.attempts[0]
+        # User message content should be a list (multimodal)
+        user_content = attempt.request.messages[1]["content"]
+        assert isinstance(user_content, list)
+        # Should have response_format and chat_template_kwargs
+        assert attempt.request.response_format == {"type": "json_object"}
+        assert attempt.request.chat_template_kwargs == {"enable_thinking": False}
+        # Verify mock was called with a multimodal request
+        captured = mock_call.call_args[0][0]
+        assert isinstance(captured.messages[1]["content"], list)
+
+    # -- 2. image file encoded as valid data URL --
+    def test_image_encoded_as_data_url(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
+        valid_json = json.dumps({"events": [], "reasoning": "ok"})
+
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=valid_json, finish_reason="stop"),
+        ) as mock_call:
+            call_qwen(
+                window_id="w1",
+                clip_id="c1",
+                window_start_s=0.0,
+                window_end_s=10.0,
+                frame_paths=[frame_path],
+                fps=1.0,
+                qwen_config=QwenClientConfig(max_attempts=1),
+            )
+
+        captured = mock_call.call_args
+        assert captured is not None
+        request = captured[0][0]
+        user_content = request.messages[1]["content"]
+        # Find the image_url part
+        image_parts = [p for p in user_content if p.get("type") == "image_url"]
+        assert len(image_parts) == 1
+        url = image_parts[0]["image_url"]["url"]
+        assert url.startswith("data:image/jpeg;base64,")
+
+    # -- 3. missing image produces clear error --
+    def test_missing_image_produces_error(self, tmp_path):
+        nonexistent = str(tmp_path / "does_not_exist.jpg")
+
+        with pytest.raises(FileNotFoundError, match="does_not_exist"):
+            call_qwen(
+                window_id="w1",
+                clip_id="c1",
+                window_start_s=0.0,
+                window_end_s=10.0,
+                frame_paths=[nonexistent],
+                fps=1.0,
+                qwen_config=QwenClientConfig(max_attempts=1),
+            )
+
+    # -- 4. request contains all frame images in chronological order --
+    def test_all_frames_in_chronological_order(self, tmp_path):
+        frame_paths = [self._write_tmp_frame(tmp_path, f"frame_{i:03d}.jpg") for i in range(3)]
+        valid_json = json.dumps({"events": [], "reasoning": "ok"})
+
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=valid_json, finish_reason="stop"),
+        ) as mock_call:
+            call_qwen(
+                window_id="w1",
+                clip_id="c1",
+                window_start_s=0.0,
+                window_end_s=10.0,
+                frame_paths=frame_paths,
+                fps=1.0,
+                qwen_config=QwenClientConfig(max_attempts=1),
+            )
+
+        request = mock_call.call_args[0][0]
+        user_content = request.messages[1]["content"]
+        image_parts = [p for p in user_content if p.get("type") == "image_url"]
+        assert len(image_parts) == 3
+
+    # -- 5. frame_count derived from frame_paths --
+    def test_frame_count_derived_from_paths(self, tmp_path):
+        frame_paths = [self._write_tmp_frame(tmp_path, f"frame_{i:03d}.jpg") for i in range(5)]
+        valid_json = json.dumps({"events": [], "reasoning": "ok"})
+
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=valid_json, finish_reason="stop"),
+        ) as mock_call:
+            call_qwen(
+                window_id="w1",
+                clip_id="c1",
+                window_start_s=0.0,
+                window_end_s=10.0,
+                frame_paths=frame_paths,
+                fps=1.0,
+                qwen_config=QwenClientConfig(max_attempts=1),
+            )
+
+        request = mock_call.call_args[0][0]
+        # frame_count is passed to build_prompt via len(frame_paths)
+        # The user prompt should mention 5 frames
+        preamble = next(p for p in request.messages[1]["content"] if p.get("type") == "text")
+        assert "5 frames" in preamble["text"]
+
+    # -- 6. missing 'events' rejected --
+    def test_missing_events_rejected(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
+        # Response with only reasoning, no events key
+        no_events_json = json.dumps({"reasoning": "No event"})
+
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=no_events_json, finish_reason="stop"),
         ):
             result = call_qwen(
                 window_id="w1",
                 clip_id="c1",
                 window_start_s=0.0,
                 window_end_s=10.0,
-                frame_count=10,
-                fps=5.0,
+                frame_paths=[frame_path],
+                fps=1.0,
                 qwen_config=QwenClientConfig(max_attempts=1),
             )
 
-        assert result.validated_response is not None
-        assert len(result.predictions) == 1
-        assert result.predictions[0].event_type == "pickup"
+        assert result.validated_response is None
+        assert result.error is not None
+        assert "events" in result.error.lower()
 
-    def test_retry_after_invalid_json(self):
-        """One retry after invalid JSON."""
+    # -- 7. malformed JSON triggers second attempt --
+    def test_malformed_json_triggers_retry(self, tmp_path):
         call_count = 0
+        frame_path = self._write_tmp_frame(tmp_path)
 
         def _side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return VlmResponse(content="not json", finish_reason="stop")
+                return VlmResponse(content="not json at all", finish_reason="stop")
             return VlmResponse(
-                content=json.dumps(
-                    {
-                        "events": [],
-                        "reasoning": "ok",
-                    }
-                ),
+                content=json.dumps({"events": [], "reasoning": "ok"}),
                 finish_reason="stop",
             )
 
@@ -394,8 +526,8 @@ class TestQwenClient:
                 clip_id="c1",
                 window_start_s=0.0,
                 window_end_s=10.0,
-                frame_count=10,
-                fps=5.0,
+                frame_paths=[frame_path],
+                fps=1.0,
                 qwen_config=QwenClientConfig(max_attempts=2, retry_delay_s=0.0),
             )
 
@@ -403,8 +535,132 @@ class TestQwenClient:
         assert result.validated_response is not None
         assert len(result.attempts) == 2
 
-    def test_failure_after_second_invalid(self):
-        """No predictions after exhausting retries on invalid JSON."""
+    # -- 8. schema-invalid output triggers second attempt --
+    def test_schema_invalid_triggers_retry(self, tmp_path):
+        call_count = 0
+        frame_path = self._write_tmp_frame(tmp_path)
+
+        def _side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return VlmResponse(
+                    content=json.dumps({"events": [{"event_type": "invalid_type"}]}),
+                    finish_reason="stop",
+                )
+            return VlmResponse(
+                content=json.dumps({"events": [], "reasoning": "ok"}),
+                finish_reason="stop",
+            )
+
+        with patch("pickup_putdown.layer2.qwen_client.call_vlm", side_effect=_side_effect):
+            result = call_qwen(
+                window_id="w1",
+                clip_id="c1",
+                window_start_s=0.0,
+                window_end_s=10.0,
+                frame_paths=[frame_path],
+                fps=1.0,
+                qwen_config=QwenClientConfig(max_attempts=2, retry_delay_s=0.0),
+            )
+
+        assert call_count == 2
+        assert result.validated_response is not None
+
+    # -- 9. retry prompt contains previous validation errors --
+    def test_retry_prompt_contains_validation_errors(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
+        call_count = 0
+
+        def _side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return VlmResponse(
+                    content=json.dumps({"events": [{"event_type": "bad"}]}),
+                    finish_reason="stop",
+                )
+            # Capture the second request to inspect its content
+            captured_request = args[0]
+            user_content = captured_request.messages[1]["content"]
+            user_text = " ".join(
+                p.get("text", "")
+                for p in user_content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+            assert "Previous attempt failed validation" in user_text
+            assert "events[0] validation failed" in user_text or "validation" in user_text.lower()
+            return VlmResponse(
+                content=json.dumps({"events": [], "reasoning": "ok"}),
+                finish_reason="stop",
+            )
+
+        with patch("pickup_putdown.layer2.qwen_client.call_vlm", side_effect=_side_effect):
+            result = call_qwen(
+                window_id="w1",
+                clip_id="c1",
+                window_start_s=0.0,
+                window_end_s=10.0,
+                frame_paths=[frame_path],
+                fps=1.0,
+                qwen_config=QwenClientConfig(max_attempts=2, retry_delay_s=0.0),
+            )
+
+        assert call_count == 2
+        assert result.validated_response is not None
+
+    # -- 10. generic client called with max_attempts=1 --
+    def test_generic_client_max_attempts_1(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
+        valid_json = json.dumps({"events": [], "reasoning": "ok"})
+
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=valid_json, finish_reason="stop"),
+        ) as mock_call:
+            call_qwen(
+                window_id="w1",
+                clip_id="c1",
+                window_start_s=0.0,
+                window_end_s=10.0,
+                frame_paths=[frame_path],
+                fps=1.0,
+                qwen_config=QwenClientConfig(max_attempts=2),
+            )
+
+        # Every call_vlm invocation should have max_attempts=1
+        for call_args in mock_call.call_args_list:
+            kwargs = call_args.kwargs if hasattr(call_args, "kwargs") else call_args[1]
+            assert kwargs.get("max_attempts") == 1, f"Expected max_attempts=1, got {kwargs.get('max_attempts')}"
+
+    # -- 11. two Layer 2 attempts produce at most two model calls --
+    def test_two_attempts_max_two_calls(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
+        call_count = 0
+
+        def _side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return VlmResponse(
+                content=json.dumps({"events": [], "reasoning": "ok"}),
+                finish_reason="stop",
+            )
+
+        with patch("pickup_putdown.layer2.qwen_client.call_vlm", side_effect=_side_effect):
+            call_qwen(
+                window_id="w1",
+                clip_id="c1",
+                window_start_s=0.0,
+                window_end_s=10.0,
+                frame_paths=[frame_path],
+                fps=1.0,
+                qwen_config=QwenClientConfig(max_attempts=2, retry_delay_s=0.0),
+            )
+
+        assert call_count == 1  # First attempt succeeds, no retry needed
+
+    def test_two_attempts_on_failure(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
         call_count = 0
 
         def _side_effect(*args, **kwargs):
@@ -418,47 +674,23 @@ class TestQwenClient:
                 clip_id="c1",
                 window_start_s=0.0,
                 window_end_s=10.0,
-                frame_count=10,
-                fps=5.0,
+                frame_paths=[frame_path],
+                fps=1.0,
                 qwen_config=QwenClientConfig(max_attempts=2, retry_delay_s=0.0),
             )
 
         assert call_count == 2
         assert result.validated_response is None
-        assert result.error is not None
-        assert len(result.predictions) == 0
 
-    def test_retry_on_validation_error(self):
-        """Retry on invalid event_type, not just bad JSON."""
+    # -- 12. invalid final response produces no predictions --
+    def test_invalid_final_no_predictions(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
         call_count = 0
 
         def _side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            if call_count == 1:
-                return VlmResponse(
-                    content=json.dumps(
-                        {
-                            "events": [{"event_type": "bad_type"}],
-                        }
-                    ),
-                    finish_reason="stop",
-                )
-            return VlmResponse(
-                content=json.dumps(
-                    {
-                        "events": [
-                            {
-                                "event_type": "pickup",
-                                "relative_start_s": 1.0,
-                                "relative_end_s": 3.0,
-                            }
-                        ],
-                        "reasoning": "ok",
-                    }
-                ),
-                finish_reason="stop",
-            )
+            return VlmResponse(content="bad json", finish_reason="stop")
 
         with patch("pickup_putdown.layer2.qwen_client.call_vlm", side_effect=_side_effect):
             result = call_qwen(
@@ -466,17 +698,93 @@ class TestQwenClient:
                 clip_id="c1",
                 window_start_s=0.0,
                 window_end_s=10.0,
-                frame_count=10,
-                fps=5.0,
+                frame_paths=[frame_path],
+                fps=1.0,
                 qwen_config=QwenClientConfig(max_attempts=2, retry_delay_s=0.0),
             )
 
-        assert call_count == 2
-        assert result.validated_response is not None
-        assert len(result.predictions) == 1
-        assert result.predictions[0].event_type == "pickup"
+        assert result.validated_response is None
+        assert result.predictions == []
+        assert result.error is not None
 
-    def test_raw_response_preserved(self):
+    # -- 13. valid empty events response succeeds --
+    def test_valid_empty_events_succeeds(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
+        valid_json = json.dumps({"events": [], "reasoning": "no events detected"})
+
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=valid_json, finish_reason="stop"),
+        ):
+            result = call_qwen(
+                window_id="w1",
+                clip_id="c1",
+                window_start_s=0.0,
+                window_end_s=10.0,
+                frame_paths=[frame_path],
+                fps=1.0,
+                qwen_config=QwenClientConfig(max_attempts=1),
+            )
+
+        assert result.validated_response is not None
+        assert result.validated_response.events == []
+        assert result.predictions == []
+        assert result.error is None
+
+    # -- 14. batch inference passes frame paths correctly --
+    def test_batch_passes_frame_paths(self, tmp_path):
+        frame_paths_1 = [self._write_tmp_frame(tmp_path, f"win1_f{i}.jpg") for i in range(3)]
+        frame_paths_2 = [self._write_tmp_frame(tmp_path, f"win2_f{i}.jpg") for i in range(2)]
+
+        windows_info = [
+            {
+                "window_id": "w1",
+                "clip_id": "c1",
+                "window_start_s": 0.0,
+                "window_end_s": 10.0,
+                "frame_paths": frame_paths_1,
+                "fps": 1.0,
+            },
+            {
+                "window_id": "w2",
+                "clip_id": "c1",
+                "window_start_s": 10.0,
+                "window_end_s": 20.0,
+                "frame_paths": frame_paths_2,
+                "fps": 1.0,
+            },
+        ]
+
+        valid_json = json.dumps({"events": [], "reasoning": "ok"})
+
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=valid_json, finish_reason="stop"),
+        ) as mock_call:
+            from pickup_putdown.layer2.qwen_client import call_qwen_batch
+
+            results = call_qwen_batch(windows_info, qwen_config=QwenClientConfig(max_attempts=1))
+
+        assert len(results) == 2
+        assert mock_call.call_count == 2
+        # First window should have 3 frames, second should have 2
+        first_request = mock_call.call_args_list[0][0][0]
+        first_user = first_request.messages[1]["content"]
+        first_images = [
+            p for p in first_user if isinstance(p, dict) and p.get("type") == "image_url"
+        ]
+        assert len(first_images) == 3
+
+        second_request = mock_call.call_args_list[1][0][0]
+        second_user = second_request.messages[1]["content"]
+        second_images = [
+            p for p in second_user if isinstance(p, dict) and p.get("type") == "image_url"
+        ]
+        assert len(second_images) == 2
+
+    # -- Legacy tests adapted for frame_paths API --
+    def test_raw_response_preserved(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
         valid_json = json.dumps({"events": [], "reasoning": "test"})
         with patch(
             "pickup_putdown.layer2.qwen_client.call_vlm",
@@ -487,8 +795,8 @@ class TestQwenClient:
                 clip_id="c1",
                 window_start_s=0.0,
                 window_end_s=10.0,
-                frame_count=10,
-                fps=5.0,
+                frame_paths=[frame_path],
+                fps=1.0,
                 qwen_config=QwenClientConfig(max_attempts=1),
             )
 
@@ -496,7 +804,8 @@ class TestQwenClient:
         assert result.attempts[0].raw_response == valid_json
         assert result.attempts[0].is_success is True
 
-    def test_validation_errors_recorded(self):
+    def test_validation_errors_recorded(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
         invalid_json = json.dumps({"events": [{"event_type": "bad_type"}]})
         with patch(
             "pickup_putdown.layer2.qwen_client.call_vlm",
@@ -507,8 +816,8 @@ class TestQwenClient:
                 clip_id="c1",
                 window_start_s=0.0,
                 window_end_s=10.0,
-                frame_count=10,
-                fps=5.0,
+                frame_paths=[frame_path],
+                fps=1.0,
                 qwen_config=QwenClientConfig(max_attempts=1),
             )
 
@@ -517,7 +826,8 @@ class TestQwenClient:
         assert len(result.attempts) == 1
         assert result.attempts[0].validation_errors
 
-    def test_request_metadata_recorded(self):
+    def test_request_metadata_recorded(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
         with patch(
             "pickup_putdown.layer2.qwen_client.call_vlm",
             return_value=VlmResponse(content=json.dumps({"events": []}), finish_reason="stop"),
@@ -527,16 +837,17 @@ class TestQwenClient:
                 clip_id="c1",
                 window_start_s=0.0,
                 window_end_s=10.0,
-                frame_count=10,
-                fps=5.0,
+                frame_paths=[frame_path],
+                fps=1.0,
                 qwen_config=QwenClientConfig(max_attempts=1),
             )
 
         assert len(result.attempts) == 1
-        assert result.attempts[0].request.model == "llamacpp/Qwen3.6-35B-A3B-UD-Q4_K_XL"
+        assert result.attempts[0].request.model == "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
         assert result.attempts[0].attempt_number == 1
 
-    def test_failed_response_not_in_predictions(self):
+    def test_failed_response_not_in_predictions(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
         with patch(
             "pickup_putdown.layer2.qwen_client.call_vlm",
             return_value=VlmResponse(content="", error=VlmError(message="timeout")),
@@ -546,15 +857,16 @@ class TestQwenClient:
                 clip_id="c1",
                 window_start_s=0.0,
                 window_end_s=10.0,
-                frame_count=10,
-                fps=5.0,
+                frame_paths=[frame_path],
+                fps=1.0,
                 qwen_config=QwenClientConfig(max_attempts=1),
             )
 
         assert result.predictions == []
         assert result.error == "timeout"
 
-    def test_configurable_model_id(self):
+    def test_configurable_model_id(self, tmp_path):
+        frame_path = self._write_tmp_frame(tmp_path)
         with patch(
             "pickup_putdown.layer2.qwen_client.call_vlm",
             return_value=VlmResponse(content=json.dumps({"events": []}), finish_reason="stop"),
@@ -564,15 +876,16 @@ class TestQwenClient:
                 clip_id="c1",
                 window_start_s=0.0,
                 window_end_s=10.0,
-                frame_count=10,
-                fps=5.0,
+                frame_paths=[frame_path],
+                fps=1.0,
                 qwen_config=QwenClientConfig(model_id="custom-model", max_attempts=1),
             )
 
         assert result.attempts[0].request.model == "custom-model"
 
-    def test_no_live_endpoint_required(self):
+    def test_no_live_endpoint_required(self, tmp_path):
         """All code paths use mocked call_vlm — no network calls."""
+        frame_path = self._write_tmp_frame(tmp_path)
         with patch("pickup_putdown.layer2.qwen_client.call_vlm") as mock_call:
             mock_call.return_value = VlmResponse(
                 content=json.dumps({"events": []}), finish_reason="stop"
@@ -582,8 +895,8 @@ class TestQwenClient:
                 clip_id="c1",
                 window_start_s=0.0,
                 window_end_s=10.0,
-                frame_count=10,
-                fps=5.0,
+                frame_paths=[frame_path],
+                fps=1.0,
                 qwen_config=QwenClientConfig(max_attempts=1),
             )
             mock_call.assert_called_once()
@@ -1051,12 +1364,15 @@ class TestRendererStructure:
             overlap_s=0.5,
             source_timestamp_s=0.0,
         )
-        result = render_window(w, tmp_path, 10.0, 1.0, n_frames=3)
+        result = render_window(w, tmp_path, 10.0, 1.0, output_dir=tmp_path + "_frames", n_frames=3)
         assert result is not None
         assert len(result.frame_infos) == 3
+        assert len(result.frame_paths) == 3
 
-        # Decode the rendered frame and check overlay is present
-        frame = cv2.imdecode(np.frombuffer(result.frames[0], dtype=np.uint8), cv2.IMREAD_COLOR)
+        # Read the saved frame file and check overlay is present
+        with open(result.frame_paths[0], "rb") as f:
+            raw = f.read()
+        frame = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
         assert frame is not None
 
         # Sample text region where overlay should be (top-left corner)

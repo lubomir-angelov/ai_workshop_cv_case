@@ -1,15 +1,16 @@
 """Frame extraction and VLM input preparation for Layer 2 windows.
 
 Extracts evenly-spaced frames from a video clip for each window,
-records metadata (frame indices, timestamps, sampling rate, dimensions),
-and returns base64-encoded frames suitable for the shared VLM client.
+saves them as timestamped JPEG files, records metadata (frame indices,
+timestamps, sampling rate, dimensions), and returns file paths for
+the shared VLM client.
 """
 
 from __future__ import annotations
 
-import base64
 import logging
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 
 import cv2
 
@@ -34,16 +35,16 @@ class WindowRender:
     window: Window
     clip_id: str
     video_path: str
-    frames: list[bytes]  # raw JPEG bytes
-    frame_infos: list[FrameInfo]
-    selected_frame_indices: list[int]
-    relative_timestamps_s: list[float]
-    source_timestamps_s: list[float]
-    sampling_rate_fps: float
-    render_width: int
-    render_height: int
-    clip_fps: float
-    clip_duration_s: float
+    frame_paths: list[str] = field(default_factory=list)
+    frame_infos: list[FrameInfo] = field(default_factory=list)
+    selected_frame_indices: list[int] = field(default_factory=list)
+    relative_timestamps_s: list[float] = field(default_factory=list)
+    source_timestamps_s: list[float] = field(default_factory=list)
+    sampling_rate_fps: float = 1.0
+    render_width: int = 0
+    render_height: int = 0
+    clip_fps: float = 0.0
+    clip_duration_s: float = 0.0
 
 
 def render_window(
@@ -52,10 +53,11 @@ def render_window(
     clip_fps: float,
     clip_duration_s: float,
     *,
+    output_dir: str | None = None,
     max_frame_width: int = 640,
     n_frames: int = 10,
 ) -> WindowRender | None:
-    """Extract frames for one window and prepare VLM input.
+    """Extract frames for one window, save as JPEG files, and return paths.
 
     Returns None if the video cannot be opened or no frames can be extracted.
     """
@@ -63,6 +65,8 @@ def render_window(
     if not cap.isOpened():
         logger.error("Cannot open video: %s", video_path)
         return None
+
+    frame_paths: list[str] = []
 
     try:
         actual_fps = cap.get(cv2.CAP_PROP_FPS) or clip_fps
@@ -126,7 +130,16 @@ def render_window(
             )
 
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            frames_bytes = buf.tobytes()
+            frame_bytes = buf.tobytes()
+
+            # Save frame to disk
+            frame_path = None
+            if output_dir is not None:
+                os.makedirs(output_dir, exist_ok=True)
+                frame_path = os.path.join(output_dir, f"frame_{i:03d}.jpg")
+                with open(frame_path, "wb") as f:
+                    f.write(frame_bytes)
+                frame_paths.append(frame_path)
 
             selected_indices.append(frame_idx)
             frame_infos.append(
@@ -149,7 +162,7 @@ def render_window(
             window=window,
             clip_id=window.clip_id,
             video_path=video_path,
-            frames=[frames_bytes],  # keep as list for multi-frame support
+            frame_paths=frame_paths,
             frame_infos=frame_infos,
             selected_frame_indices=selected_indices,
             relative_timestamps_s=[round(fi.relative_timestamp_s, 3) for fi in frame_infos],
@@ -166,6 +179,8 @@ def render_window(
 
 def frames_to_base64(frames: list[bytes]) -> list[str]:
     """Convert raw JPEG bytes to base64 strings for VLM API."""
+    import base64
+
     return [base64.b64encode(f).decode("ascii") for f in frames]
 
 
@@ -175,6 +190,7 @@ def render_all_windows(
     clip_fps: float,
     clip_duration_s: float,
     *,
+    output_dir: str | None = None,
     max_frame_width: int = 640,
     n_frames: int = 10,
 ) -> list[WindowRender]:
@@ -186,6 +202,7 @@ def render_all_windows(
             video_path,
             clip_fps,
             clip_duration_s,
+            output_dir=output_dir,
             max_frame_width=max_frame_width,
             n_frames=n_frames,
         )
