@@ -37,12 +37,14 @@ from pickup_putdown.layer1.track_b1.train import (
 from pickup_putdown.layer1.track_b1.inference import (
     EventPrediction,
     InferenceConfig,
+    InferenceWindowDataset,
     ScoreRegion,
     WindowPrediction,
     create_event_predictions,
     detect_score_peaks,
     infer_all_candidates,
     infer_candidate,
+    inference_collate_fn,
     merge_same_type_regions,
     predict_windows,
     save_predictions,
@@ -85,6 +87,8 @@ __all__ = [
     "run_tiny_overfit_test",
     # Inference
     "InferenceConfig",
+    "InferenceWindowDataset",
+    "inference_collate_fn",
     "WindowPrediction",
     "ScoreRegion",
     "EventPrediction",

@@ -27,6 +27,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader, Dataset
 
 from pickup_putdown.layer1.track_b1.dataset import (
     LABEL_BACKGROUND,
@@ -81,6 +82,9 @@ class InferenceConfig:
 
     # Processing
     batch_size: int = 8
+    num_workers: int = 4  # DataLoader workers for parallel CPU decoding
+    pin_memory: bool = True  # Faster CPU→GPU transfer (allocates in page-locked memory)
+    prefetch_factor: int = 2  # Batches to prefetch per worker
 
     def to_window_config(self) -> WindowConfig:
         """Convert to WindowConfig for window generation."""
@@ -164,6 +168,120 @@ class EventPrediction:
 
 
 # ============================================================
+# INFERENCE DATASET (for parallel CPU decoding)
+# ============================================================
+
+
+class InferenceWindowDataset(Dataset):
+    """PyTorch Dataset for inference windows with parallel frame decoding.
+
+    Each worker process decodes frames independently, enabling CPU/GPU overlap.
+    Video captures are lazily initialized per-worker (cv2.VideoCapture can't be pickled).
+    """
+
+    def __init__(
+        self,
+        windows: list[InferenceWindow],
+        video_path: Path,
+        pose_track_df: pd.DataFrame,
+        shelf_region: Optional[dict],
+        config: InferenceConfig,
+    ):
+        self.windows = windows
+        self.video_path = video_path
+        self.pose_track_df = pose_track_df
+        self.shelf_region = shelf_region
+        self.config = config
+
+    def __len__(self) -> int:
+        return len(self.windows)
+
+    def __getitem__(self, idx: int) -> dict:
+        """Prepare single window tensor with metadata.
+
+        Returns:
+            Dict with:
+                - tensor: [num_frames, C, H, W] normalized tensor
+                - window_start_s: float
+                - window_end_s: float
+                - window_center_s: float
+        """
+        window = self.windows[idx]
+
+        # Decode frames for this window
+        frames = decode_window_frames(
+            video_path=self.video_path,
+            start_s=window.window_start_s,
+            end_s=window.window_end_s,
+            num_frames=self.config.num_frames,
+        )
+
+        if frames is None:
+            # Use zero tensor as fallback
+            logger.warning(
+                f"Failed to decode frames for window "
+                f"[{window.window_start_s:.2f}-{window.window_end_s:.2f}]"
+            )
+            frames = np.zeros(
+                (self.config.num_frames, self.config.image_size[1], self.config.image_size[0], 3),
+                dtype=np.uint8,
+            )
+
+        # Get frame dimensions
+        frame_h, frame_w = frames.shape[1:3]
+
+        # Compute actor-conditioned crop box
+        crop_box = compute_actor_crop_box(
+            pose_track_df=self.pose_track_df,
+            shelf_region=self.shelf_region,
+            start_s=window.window_start_s,
+            end_s=window.window_end_s,
+            margin=self.config.crop_margin,
+            frame_size=(frame_w, frame_h),
+        )
+
+        # Apply crop and resize
+        frames = apply_crop_and_resize(
+            frames=frames,
+            crop_box=crop_box,
+            target_size=self.config.image_size,
+        )
+
+        # Normalize to tensor
+        tensor = normalize_frames(frames)
+
+        return {
+            "tensor": tensor,
+            "window_start_s": window.window_start_s,
+            "window_end_s": window.window_end_s,
+            "window_center_s": window.window_center_s,
+        }
+
+
+def inference_collate_fn(batch: list[dict]) -> dict:
+    """Custom collate function for inference batches.
+
+    Stacks tensors and preserves window metadata as lists.
+
+    Args:
+        batch: List of dicts from InferenceWindowDataset.__getitem__
+
+    Returns:
+        Dict with:
+            - tensor: [batch_size, num_frames, C, H, W] stacked tensor
+            - window_start_s: list[float]
+            - window_end_s: list[float]
+            - window_center_s: list[float]
+    """
+    return {
+        "tensor": torch.stack([item["tensor"] for item in batch], dim=0),
+        "window_start_s": [item["window_start_s"] for item in batch],
+        "window_end_s": [item["window_end_s"] for item in batch],
+        "window_center_s": [item["window_center_s"] for item in batch],
+    }
+
+
+# ============================================================
 # MODEL INFERENCE
 # ============================================================
 
@@ -179,6 +297,9 @@ def predict_windows(
     device: torch.device,
 ) -> list[WindowPrediction]:
     """Run model inference on all windows for a candidate.
+
+    Uses DataLoader with multiple workers for parallel CPU frame decoding,
+    eliminating GPU idle time while waiting for batches.
 
     Args:
         model: Trained VideoMAE classifier.
@@ -198,41 +319,49 @@ def predict_windows(
     model.eval()
     predictions: list[WindowPrediction] = []
 
-    # Process in batches
-    for batch_start in range(0, len(windows), config.batch_size):
-        batch_end = min(batch_start + config.batch_size, len(windows))
-        batch_windows = windows[batch_start:batch_end]
+    # Create dataset and dataloader for parallel CPU decoding
+    dataset = InferenceWindowDataset(
+        windows=windows,
+        video_path=video_path,
+        pose_track_df=pose_track_df,
+        shelf_region=shelf_region,
+        config=config,
+    )
 
-        # Prepare batch tensor
-        batch_tensor = _prepare_window_batch(
-            windows=batch_windows,
-            video_path=video_path,
-            pose_track_df=pose_track_df,
-            shelf_region=shelf_region,
-            config=config,
-        )
+    # Configure DataLoader
+    # - num_workers > 0: parallel CPU decoding in separate processes
+    # - pin_memory: faster CPU→GPU transfer
+    # - prefetch_factor: batches to prepare ahead per worker
+    use_multiprocessing = config.num_workers > 0
+    loader = DataLoader(
+        dataset,
+        batch_size=config.batch_size,
+        shuffle=False,  # Preserve temporal order
+        num_workers=config.num_workers,
+        pin_memory=config.pin_memory and device.type == "cuda",
+        prefetch_factor=config.prefetch_factor if use_multiprocessing else None,
+        collate_fn=inference_collate_fn,
+        persistent_workers=use_multiprocessing,  # Keep workers alive between batches
+    )
 
-        if batch_tensor is None:
-            # Failed to prepare batch, skip
-            logger.warning(f"Failed to prepare batch {batch_start}-{batch_end}")
-            continue
-
-        # Move to device and predict
-        batch_tensor = batch_tensor.to(device)
+    # Process batches (workers prefetch in background)
+    for batch in loader:
+        batch_tensor = batch["tensor"].to(device, non_blocking=config.pin_memory)
         logits = model(batch_tensor)
         probs = torch.softmax(logits, dim=-1).cpu().numpy()
 
-        # Create WindowPrediction for each
-        for i, window in enumerate(batch_windows):
+        # Create WindowPrediction for each item in batch
+        batch_size = len(batch["window_start_s"])
+        for i in range(batch_size):
             window_probs = probs[i]
             predicted_class = int(np.argmax(window_probs))
             confidence = float(window_probs[predicted_class])
 
             predictions.append(
                 WindowPrediction(
-                    window_start_s=window.window_start_s,
-                    window_end_s=window.window_end_s,
-                    window_center_s=window.window_center_s,
+                    window_start_s=batch["window_start_s"][i],
+                    window_end_s=batch["window_end_s"][i],
+                    window_center_s=batch["window_center_s"][i],
                     probs=window_probs,
                     predicted_class=predicted_class,
                     confidence=confidence,
@@ -240,79 +369,6 @@ def predict_windows(
             )
 
     return predictions
-
-
-def _prepare_window_batch(
-    windows: list[InferenceWindow],
-    video_path: Path,
-    pose_track_df: pd.DataFrame,
-    shelf_region: Optional[dict],
-    config: InferenceConfig,
-) -> Optional[torch.Tensor]:
-    """Prepare batch of windows for model input.
-
-    Args:
-        windows: List of InferenceWindow objects.
-        video_path: Path to video file.
-        pose_track_df: Pose track for actor (for cropping).
-        shelf_region: Shelf region config.
-        config: Inference configuration.
-
-    Returns:
-        Tensor of shape [batch_size, num_frames, channels, height, width],
-        or None if preparation failed.
-    """
-    batch_frames: list[torch.Tensor] = []
-
-    for window in windows:
-        # Decode frames for this window
-        frames = decode_window_frames(
-            video_path=video_path,
-            start_s=window.window_start_s,
-            end_s=window.window_end_s,
-            num_frames=config.num_frames,
-        )
-
-        if frames is None:
-            # Use zero tensor as fallback
-            logger.warning(
-                f"Failed to decode frames for window "
-                f"[{window.window_start_s:.2f}-{window.window_end_s:.2f}]"
-            )
-            frames = np.zeros(
-                (config.num_frames, config.image_size[1], config.image_size[0], 3),
-                dtype=np.uint8,
-            )
-
-        # Get frame dimensions
-        frame_h, frame_w = frames.shape[1:3]
-
-        # Compute actor-conditioned crop box
-        crop_box = compute_actor_crop_box(
-            pose_track_df=pose_track_df,
-            shelf_region=shelf_region,
-            start_s=window.window_start_s,
-            end_s=window.window_end_s,
-            margin=config.crop_margin,
-            frame_size=(frame_w, frame_h),
-        )
-
-        # Apply crop and resize
-        frames = apply_crop_and_resize(
-            frames=frames,
-            crop_box=crop_box,
-            target_size=config.image_size,
-        )
-
-        # Normalize to tensor
-        tensor = normalize_frames(frames)
-        batch_frames.append(tensor)
-
-    if not batch_frames:
-        return None
-
-    # Stack into batch: [batch_size, num_frames, channels, height, width]
-    return torch.stack(batch_frames, dim=0)
 
 
 # ============================================================

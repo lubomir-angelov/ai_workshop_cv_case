@@ -86,6 +86,9 @@ inference:
 
   # Processing
   batch_size: 8
+  num_workers: 4        # DataLoader workers for parallel CPU frame decoding
+  pin_memory: true      # Faster CPU→GPU transfer (page-locked memory)
+  prefetch_factor: 2    # Batches to prefetch per worker (buffer depth)
 
 # =============================================================================
 # DATA PATHS (Override via CLI or environment)
