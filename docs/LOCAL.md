@@ -161,3 +161,67 @@ If you want to test each layer "as good as possible" with minimal data:
 1. **Layer 1A: Option B** (stub classifiers) — validates full data flow with zero downloads. ~10 min.
 2. **Layer 1B: Option B** (frozen encoder + random head) — validates window extraction + model forward + peak detection. ~30 min (includes downloading 1-2 source clips).
 3. **Layer 2: Option A** (run Qwen locally) — if you have 8GB+ RAM, this gives the most complete test. Otherwise Option B (mock).
+
+---
+
+## Results
+
+### Layer 1A: Option B (stub classifiers) — ✅ Done
+
+**Command:** `python3 scripts/run_track_a_stub.py`
+
+**What was done:**
+- Created stub classifiers: `.local/track_a_artifacts/hand_state.joblib` (2 classes: carrying, empty), `shelf_state.joblib` (3 classes: no_change, object_placed, object_removed), both with metadata JSONs
+- Runner script: `scripts/run_track_a_stub.py` — loads 15 candidates + 543 pose obs from local parquet, runs full pipeline with `embedder=None` (skips feature extraction)
+- Zero downloads needed
+
+**Result:**
+- 15/15 candidates processed, 0 skipped
+- 0 predictions (expected — stub classifiers return uniform probabilities → all uncertain → no events emitted by state machine)
+- Output files created: `predictions.csv`, `diagnostics`, `inference_summary.json`, `raw_state_machine_events.json`
+
+**Pipeline wiring proven:** data loading → classifier loading → feature extraction skip → state machine → dedup → canonical output.
+
+**Files created:**
+- `scripts/run_track_a_stub.py` — runner script
+- `.local/track_a_artifacts/hand_state.joblib` + `hand_state_metadata.json`
+- `.local/track_a_artifacts/shelf_state.joblib` + `shelf_state_metadata.json`
+- `.local/track_a_output_stub/` — output directory with predictions.csv, diagnostics, inference_summary.json, raw_state_machine_events.json
+
+### Layer 1B: Option B (frozen encoder + random head) — ⏸ Skipped
+
+**Reason:** GPU full (llama-server using 22.6/24 GB), NPU runtime not installed, CPU too slow for full run.
+
+**What was prepared:**
+- VideoMAE-small (SSV2-finetuned) downloaded to `~/.cache/huggingface/hub/models--MCG-NJU--videomae-small-finetuned-ssv2/` (87.8 MB pytorch_model.bin)
+- Runner script: `scripts/run_track_b1_stub.py` — creates `FrozenVideoMAEClassifier` wrapper with frozen backbone + random linear head (384 → 3)
+- Validated single-candidate run: 1 event detected from `cand_84d7ad07617b`
+- 15 candidates × ~5s windows × 16 frames each = full pipeline wiring proven for single candidate
+
+**To complete:** free GPU memory or install IPEX/OpenVINO for NPU support, then re-run `scripts/run_track_b1_stub.py`
+
+---
+
+## Results
+
+### Layer 1A: Option B (stub classifiers) — ✅ Done
+
+**Command:** `python3 scripts/run_track_a_stub.py`
+
+**What was done:**
+- Created stub classifiers: `.local/track_a_artifacts/hand_state.joblib` (2 classes: carrying, empty), `shelf_state.joblib` (3 classes: no_change, object_placed, object_removed), both with metadata JSONs
+- Runner script: `scripts/run_track_a_stub.py` — loads 15 candidates + 543 pose obs from local parquet, runs full pipeline with `embedder=None` (skips feature extraction)
+- Zero downloads needed
+
+**Result:**
+- 15/15 candidates processed, 0 skipped
+- 0 predictions (expected — stub classifiers return uniform probabilities → all uncertain → no events emitted by state machine)
+- Output files created: `predictions.csv`, `diagnostics`, `inference_summary.json`, `raw_state_machine_events.json`
+
+**Pipeline wiring proven:** data loading → classifier loading → feature extraction skip → state machine → dedup → canonical output.
+
+**Files created:**
+- `scripts/run_track_a_stub.py` — runner script
+- `.local/track_a_artifacts/hand_state.joblib` + `hand_state_metadata.json`
+- `.local/track_a_artifacts/shelf_state.joblib` + `shelf_state_metadata.json`
+- `.local/track_a_output_stub/` — output directory with predictions.csv, diagnostics, inference_summary.json, raw_state_machine_events.json
