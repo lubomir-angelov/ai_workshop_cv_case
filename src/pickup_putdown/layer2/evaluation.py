@@ -28,21 +28,23 @@ def predictions_to_canonical(
 ) -> list[EvaluationPrediction]:
     """Convert Layer 2 predictions to evaluation-ready format.
 
+    Expands two-item events into separate rows per the repository convention.
     Preserves source timestamps and provenance via pred_id.
     """
     results: list[EvaluationPrediction] = []
     for pred in predictions:
-        results.append(
-            EvaluationPrediction(
-                clip_id=pred.clip_id,
-                type=pred.event_type,
-                t_start=pred.t_start_s,
-                t_end=pred.t_end_s,
-                pred_id=pred.pred_id,
-                score=pred.confidence,
-                model=pred.model,
+        for row in pred.to_canonical():
+            results.append(
+                EvaluationPrediction(
+                    clip_id=row["clip_id"],
+                    type=row["type"],
+                    t_start=row["t_start"],
+                    t_end=row["t_end"],
+                    pred_id=row["pred_id"],
+                    score=row["score"],
+                    model=row["model"],
+                )
             )
-        )
     return results
 
 

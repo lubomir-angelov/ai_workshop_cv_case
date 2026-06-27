@@ -78,9 +78,7 @@ def _build_request(
     attempt: int,
 ) -> VlmRequest:
     """Build a VlmRequest for one window."""
-    system_prompt, user_prompt = build_prompt(
-        window_start_s, window_end_s, frame_count, fps
-    )
+    system_prompt, user_prompt = build_prompt(window_start_s, window_end_s, frame_count, fps)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -226,17 +224,19 @@ def call_qwen(
         attempt.validation_errors = validation_errors
         attempts.append(attempt)
 
-        # Retry only on structural failures (bad JSON, missing events key).
-        # Per-event validation errors are recorded but don't trigger retry.
-        if validated_response is None:
+        # Retry on any validation error: structural (bad JSON, missing events)
+        # or per-event (invalid type, bad timestamps, wrong item count, etc.).
+        # Both attempts and both validation results are preserved for audit.
+        if validated_response is None or validation_errors:
             if attempt_num < qc.max_attempts:
                 logger.warning(
-                    "Window %s: attempt %d structural error, retrying: %s",
+                    "Window %s: attempt %d validation errors, retrying: %s",
                     window_id,
                     attempt_num,
                     validation_errors,
                 )
                 continue
+            # Last attempt still recorded for audit even with errors
             last_error = "; ".join(validation_errors)
         else:
             validated = validated_response

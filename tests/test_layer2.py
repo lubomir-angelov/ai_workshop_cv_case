@@ -136,7 +136,9 @@ class TestWindowGeneration:
             {"clip_id": "b", "active_span_id": "s1", "t_start": 0.0, "t_end": 10.0},
             {"clip_id": "a", "active_span_id": "s1", "t_start": 0.0, "t_end": 10.0},
         ]
-        windows = generate_all_windows(spans, config=WindowConfig(window_duration_s=5.0, step_duration_s=5.0))
+        windows = generate_all_windows(
+            spans, config=WindowConfig(window_duration_s=5.0, step_duration_s=5.0)
+        )
         clip_ids = [w.clip_id for w in windows]
         assert clip_ids == sorted(clip_ids)
 
@@ -282,12 +284,31 @@ class TestSchemas:
             t_end_s=3.0,
             confidence=0.9,
         )
-        canonical = pred.to_canonical()
-        assert canonical["clip_id"] == "c1"
-        assert canonical["type"] == "pickup"
-        assert canonical["t_start"] == 1.0
-        assert canonical["t_end"] == 3.0
-        assert canonical["score"] == 0.9
+        rows = pred.to_canonical()
+        assert len(rows) == 1
+        assert rows[0]["clip_id"] == "c1"
+        assert rows[0]["type"] == "pickup"
+        assert rows[0]["t_start"] == 1.0
+        assert rows[0]["t_end"] == 3.0
+        assert rows[0]["score"] == 0.9
+
+    def test_layer2_prediction_to_canonical_two_items(self):
+        pred = Layer2Prediction(
+            clip_id="c1",
+            pred_id="l2_abc",
+            event_type="pickup",
+            t_start_s=1.0,
+            t_end_s=3.0,
+            item_count=2,
+            confidence=0.9,
+            event_group_id="l2_abc",
+        )
+        rows = pred.to_canonical()
+        assert len(rows) == 2
+        assert rows[0]["pred_id"] == "l2_abc_item0"
+        assert rows[1]["pred_id"] == "l2_abc_item1"
+        assert rows[0]["event_group_id"] == "l2_abc"
+        assert rows[1]["event_group_id"] == "l2_abc"
 
 
 # ===================================================================
@@ -315,22 +336,25 @@ class TestQwenClient:
     """VLM client wrapper tests with mocked HTTP."""
 
     def test_success_returns_validated_events(self):
-        valid_json = json.dumps({
-            "events": [
-                {
-                    "event_type": "pickup",
-                    "relative_start_s": 1.0,
-                    "relative_end_s": 3.0,
-                    "item_count": 1,
-                    "visibility": "visible",
-                    "confidence": 0.9,
-                }
-            ],
-            "reasoning": "saw it",
-        })
-        with patch("pickup_putdown.layer2.qwen_client.call_vlm", return_value=VlmResponse(
-            content=valid_json, finish_reason="stop"
-        )):
+        valid_json = json.dumps(
+            {
+                "events": [
+                    {
+                        "event_type": "pickup",
+                        "relative_start_s": 1.0,
+                        "relative_end_s": 3.0,
+                        "item_count": 1,
+                        "visibility": "visible",
+                        "confidence": 0.9,
+                    }
+                ],
+                "reasoning": "saw it",
+            }
+        )
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=valid_json, finish_reason="stop"),
+        ):
             result = call_qwen(
                 window_id="w1",
                 clip_id="c1",
@@ -355,10 +379,12 @@ class TestQwenClient:
             if call_count == 1:
                 return VlmResponse(content="not json", finish_reason="stop")
             return VlmResponse(
-                content=json.dumps({
-                    "events": [],
-                    "reasoning": "ok",
-                }),
+                content=json.dumps(
+                    {
+                        "events": [],
+                        "reasoning": "ok",
+                    }
+                ),
                 finish_reason="stop",
             )
 
@@ -402,11 +428,60 @@ class TestQwenClient:
         assert result.error is not None
         assert len(result.predictions) == 0
 
+    def test_retry_on_validation_error(self):
+        """Retry on invalid event_type, not just bad JSON."""
+        call_count = 0
+
+        def _side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return VlmResponse(
+                    content=json.dumps(
+                        {
+                            "events": [{"event_type": "bad_type"}],
+                        }
+                    ),
+                    finish_reason="stop",
+                )
+            return VlmResponse(
+                content=json.dumps(
+                    {
+                        "events": [
+                            {
+                                "event_type": "pickup",
+                                "relative_start_s": 1.0,
+                                "relative_end_s": 3.0,
+                            }
+                        ],
+                        "reasoning": "ok",
+                    }
+                ),
+                finish_reason="stop",
+            )
+
+        with patch("pickup_putdown.layer2.qwen_client.call_vlm", side_effect=_side_effect):
+            result = call_qwen(
+                window_id="w1",
+                clip_id="c1",
+                window_start_s=0.0,
+                window_end_s=10.0,
+                frame_count=10,
+                fps=5.0,
+                qwen_config=QwenClientConfig(max_attempts=2, retry_delay_s=0.0),
+            )
+
+        assert call_count == 2
+        assert result.validated_response is not None
+        assert len(result.predictions) == 1
+        assert result.predictions[0].event_type == "pickup"
+
     def test_raw_response_preserved(self):
         valid_json = json.dumps({"events": [], "reasoning": "test"})
-        with patch("pickup_putdown.layer2.qwen_client.call_vlm", return_value=VlmResponse(
-            content=valid_json, finish_reason="stop"
-        )):
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=valid_json, finish_reason="stop"),
+        ):
             result = call_qwen(
                 window_id="w1",
                 clip_id="c1",
@@ -423,9 +498,10 @@ class TestQwenClient:
 
     def test_validation_errors_recorded(self):
         invalid_json = json.dumps({"events": [{"event_type": "bad_type"}]})
-        with patch("pickup_putdown.layer2.qwen_client.call_vlm", return_value=VlmResponse(
-            content=invalid_json, finish_reason="stop"
-        )):
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=invalid_json, finish_reason="stop"),
+        ):
             result = call_qwen(
                 window_id="w1",
                 clip_id="c1",
@@ -436,13 +512,16 @@ class TestQwenClient:
                 qwen_config=QwenClientConfig(max_attempts=1),
             )
 
-        assert result.validated_response is not None
-        assert len(result.validated_response.validation_errors) > 0
+        assert result.validated_response is None
+        assert result.error is not None
+        assert len(result.attempts) == 1
+        assert result.attempts[0].validation_errors
 
     def test_request_metadata_recorded(self):
-        with patch("pickup_putdown.layer2.qwen_client.call_vlm", return_value=VlmResponse(
-            content=json.dumps({"events": []}), finish_reason="stop"
-        )):
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=json.dumps({"events": []}), finish_reason="stop"),
+        ):
             result = call_qwen(
                 window_id="w1",
                 clip_id="c1",
@@ -458,9 +537,10 @@ class TestQwenClient:
         assert result.attempts[0].attempt_number == 1
 
     def test_failed_response_not_in_predictions(self):
-        with patch("pickup_putdown.layer2.qwen_client.call_vlm", return_value=VlmResponse(
-            content="", error=VlmError(message="timeout")
-        )):
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content="", error=VlmError(message="timeout")),
+        ):
             result = call_qwen(
                 window_id="w1",
                 clip_id="c1",
@@ -475,9 +555,10 @@ class TestQwenClient:
         assert result.error == "timeout"
 
     def test_configurable_model_id(self):
-        with patch("pickup_putdown.layer2.qwen_client.call_vlm", return_value=VlmResponse(
-            content=json.dumps({"events": []}), finish_reason="stop"
-        )):
+        with patch(
+            "pickup_putdown.layer2.qwen_client.call_vlm",
+            return_value=VlmResponse(content=json.dumps({"events": []}), finish_reason="stop"),
+        ):
             result = call_qwen(
                 window_id="w1",
                 clip_id="c1",
@@ -485,9 +566,7 @@ class TestQwenClient:
                 window_end_s=10.0,
                 frame_count=10,
                 fps=5.0,
-                qwen_config=QwenClientConfig(
-                    model_id="custom-model", max_attempts=1
-                ),
+                qwen_config=QwenClientConfig(model_id="custom-model", max_attempts=1),
             )
 
         assert result.attempts[0].request.model == "custom-model"
@@ -518,8 +597,18 @@ class TestQwenClient:
 class TestMergePredictions:
     """Duplicate merging: deterministic, event-type aware."""
 
-    def _make_response(self, window_id, clip_id, start, end, event_type="pickup",
-                       item_count=1, confidence=0.9, rel_start=0.5, rel_end=1.5):
+    def _make_response(
+        self,
+        window_id,
+        clip_id,
+        start,
+        end,
+        event_type="pickup",
+        item_count=1,
+        confidence=0.9,
+        rel_start=0.5,
+        rel_end=1.5,
+    ):
         return Layer2WindowResponse(
             window_id=window_id,
             clip_id=clip_id,
@@ -544,8 +633,12 @@ class TestMergePredictions:
         # Better: w1 [0,10] rel [2,4] → abs [2,4]; w2 [3,13] rel [0,2] → abs [3,5]
         # abs [2,4] and [3,5] overlap → merge
         responses = [
-            self._make_response("w1", "c1", 0.0, 10.0, "pickup", 1, 0.9, rel_start=2.0, rel_end=4.0),
-            self._make_response("w2", "c1", 3.0, 13.0, "pickup", 1, 0.8, rel_start=0.0, rel_end=2.0),
+            self._make_response(
+                "w1", "c1", 0.0, 10.0, "pickup", 1, 0.9, rel_start=2.0, rel_end=4.0
+            ),
+            self._make_response(
+                "w2", "c1", 3.0, 13.0, "pickup", 1, 0.8, rel_start=0.0, rel_end=2.0
+            ),
         ]
         # abs: [2,4] and [3,5] → overlap → merge into one
         merged = merge_fn(responses)
@@ -584,15 +677,40 @@ class TestMergePredictions:
         assert len(merged) == 1
         assert merged[0].item_count == 2
 
+    def test_two_item_has_group_id(self):
+        """Two-item events get event_group_id set."""
+        responses = [
+            self._make_response("w1", "c1", 0.0, 10.0, "pickup", item_count=2, confidence=0.9),
+        ]
+        merged = merge_fn(responses)
+        assert len(merged) == 1
+        assert merged[0].item_count == 2
+        assert merged[0].event_group_id == merged[0].pred_id
+
+    def test_single_item_no_group_id(self):
+        """Single-item events have empty event_group_id."""
+        responses = [
+            self._make_response("w1", "c1", 0.0, 10.0, "pickup", item_count=1, confidence=0.9),
+        ]
+        merged = merge_fn(responses)
+        assert len(merged) == 1
+        assert merged[0].event_group_id == ""
+
     def test_contributing_window_ids_retained(self):
         # All three windows report the same absolute event [2,4]
         # w_a [0,10] rel [2,4] → abs [2,4]
         # w_b [0,10] rel [2,4] → abs [2,4] (same window range, different ID)
         # w_c [0,10] rel [2,4] → abs [2,4]
         responses = [
-            self._make_response("w_a", "c1", 0.0, 10.0, "pickup", 1, 0.9, rel_start=2.0, rel_end=4.0),
-            self._make_response("w_b", "c1", 0.0, 10.0, "pickup", 1, 0.8, rel_start=2.0, rel_end=4.0),
-            self._make_response("w_c", "c1", 0.0, 10.0, "pickup", 1, 0.7, rel_start=2.0, rel_end=4.0),
+            self._make_response(
+                "w_a", "c1", 0.0, 10.0, "pickup", 1, 0.9, rel_start=2.0, rel_end=4.0
+            ),
+            self._make_response(
+                "w_b", "c1", 0.0, 10.0, "pickup", 1, 0.8, rel_start=2.0, rel_end=4.0
+            ),
+            self._make_response(
+                "w_c", "c1", 0.0, 10.0, "pickup", 1, 0.7, rel_start=2.0, rel_end=4.0
+            ),
         ]
         merged = merge_fn(responses)
         assert len(merged) == 1
@@ -613,8 +731,12 @@ class TestMergePredictions:
     def test_max_confidence_preserved(self):
         # w1 [0,10] rel [2,4] → abs [2,4]; w2 [3,13] rel [0,2] → abs [3,5] — overlap
         responses = [
-            self._make_response("w1", "c1", 0.0, 10.0, "pickup", 1, 0.6, rel_start=2.0, rel_end=4.0),
-            self._make_response("w2", "c1", 3.0, 13.0, "pickup", 1, 0.95, rel_start=0.0, rel_end=2.0),
+            self._make_response(
+                "w1", "c1", 0.0, 10.0, "pickup", 1, 0.6, rel_start=2.0, rel_end=4.0
+            ),
+            self._make_response(
+                "w2", "c1", 3.0, 13.0, "pickup", 1, 0.95, rel_start=0.0, rel_end=2.0
+            ),
         ]
         merged = merge_fn(responses)
         assert len(merged) == 1
@@ -659,13 +781,30 @@ class TestEvaluation:
                 confidence=0.9,
             )
         ]
-        gt = [
-            EvaluationEvent(clip_id="c1", type="pickup", t_start=1.0, t_end=3.0)
-        ]
+        gt = [EvaluationEvent(clip_id="c1", type="pickup", t_start=1.0, t_end=3.0)]
         metrics = evaluation.evaluate_layer2(preds, gt, criterion=Criterion("tiou", 0.5))
         assert metrics["tp"] == 1
         assert metrics["fp"] == 0
         assert metrics["fn"] == 0
+
+    def test_predictions_to_canonical_two_items(self):
+        """Two-item events expand to separate canonical rows."""
+        preds = [
+            Layer2Prediction(
+                clip_id="c1",
+                pred_id="l2_abc",
+                event_type="pickup",
+                t_start_s=1.0,
+                t_end_s=3.0,
+                item_count=2,
+                confidence=0.9,
+                event_group_id="l2_abc",
+            )
+        ]
+        canonical = evaluation.predictions_to_canonical(preds)
+        assert len(canonical) == 2
+        assert canonical[0].pred_id == "l2_abc_item0"
+        assert canonical[1].pred_id == "l2_abc_item1"
 
     def test_evaluate_no_predictions(self):
         gt = [EvaluationEvent(clip_id="c1", type="pickup", t_start=1.0, t_end=3.0)]
@@ -705,9 +844,7 @@ class TestEvaluation:
                 ],
             )
         ]
-        gt = [
-            EvaluationEvent(clip_id="c1", type="pickup", t_start=1.0, t_end=3.0)
-        ]
+        gt = [EvaluationEvent(clip_id="c1", type="pickup", t_start=1.0, t_end=3.0)]
         metrics = evaluation.evaluate_from_responses(responses, gt)
         assert metrics["tp"] == 1
 
@@ -732,7 +869,7 @@ class TestEvaluation:
         merged = merge_fn(responses)
         assert len(merged) == 1
         assert merged[0].t_start_s == 7.0  # 5.0 + 2.0
-        assert merged[0].t_end_s == 9.0   # 5.0 + 4.0
+        assert merged[0].t_end_s == 9.0  # 5.0 + 4.0
 
     def test_provenance_preserved(self):
         responses = [
@@ -768,9 +905,17 @@ class TestPrompts:
 
     def test_system_prompt_covers_all_cases(self):
         sys = prompts.SYSTEM_PROMPT
-        for keyword in ["pickup", "putdown", "restocking", "occlusion",
-                         "multiple people", "immediate return", "multiple events",
-                         "two-item", "ambiguous"]:
+        for keyword in [
+            "pickup",
+            "putdown",
+            "restocking",
+            "occlusion",
+            "multiple people",
+            "immediate return",
+            "multiple events",
+            "two-item",
+            "ambiguous",
+        ]:
             assert keyword.lower() in sys.lower(), f"Missing: {keyword}"
 
     def test_no_layer1_info_in_prompt(self):
@@ -801,6 +946,7 @@ class TestNoLayer1Dependency:
 
     def test_window_generator_no_layer1_import(self):
         import importlib
+
         mod = importlib.import_module("pickup_putdown.layer2.window_generator")
         src = mod.__file__
         with open(src) as f:
@@ -811,6 +957,7 @@ class TestNoLayer1Dependency:
 
     def test_schemas_no_layer1_import(self):
         import importlib
+
         mod = importlib.import_module("pickup_putdown.layer2.schemas")
         src = mod.__file__
         with open(src) as f:
@@ -820,6 +967,7 @@ class TestNoLayer1Dependency:
 
     def test_qwen_client_no_layer1_import(self):
         import importlib
+
         mod = importlib.import_module("pickup_putdown.layer2.qwen_client")
         src = mod.__file__
         with open(src) as f:
@@ -829,6 +977,7 @@ class TestNoLayer1Dependency:
 
     def test_merge_no_layer1_import(self):
         import importlib
+
         mod = importlib.import_module("pickup_putdown.layer2.merge_predictions")
         src = mod.__file__
         with open(src) as f:
@@ -838,6 +987,7 @@ class TestNoLayer1Dependency:
 
     def test_evaluation_no_layer1_import(self):
         import importlib
+
         mod = importlib.import_module("pickup_putdown.layer2.evaluation")
         src = mod.__file__
         with open(src) as f:
@@ -856,6 +1006,7 @@ class TestRendererStructure:
 
     def test_frame_info_fields(self):
         from pickup_putdown.layer2 import renderer
+
         assert hasattr(renderer, "FrameInfo")
         assert hasattr(renderer, "WindowRender")
         assert hasattr(renderer, "render_window")
@@ -866,7 +1017,56 @@ class TestRendererStructure:
         import base64
 
         from pickup_putdown.layer2.renderer import frames_to_base64
+
         raw = b"\xff\xd8\xff\xe0fake jpeg data"
         encoded = frames_to_base64([raw])
         assert len(encoded) == 1
         assert base64.b64decode(encoded[0]) == raw
+
+    def test_render_window_with_video(self):
+        """Render frames from a real video file and verify overlay text."""
+        import cv2
+        import numpy as np
+
+        from pickup_putdown.layer2.renderer import render_window
+
+        # Create a 1-second test video at 10fps
+        tmp_path = "/tmp/test_overlay_video.mp4"
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(tmp_path, fourcc, 10.0, (100, 100))
+        for _ in range(10):
+            frame = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
+            writer.write(frame)
+        writer.release()
+
+        from pickup_putdown.layer2.window_generator import Window
+
+        w = Window(
+            window_id="w1",
+            clip_id="c1",
+            active_span_id="s1",
+            window_start_s=0.0,
+            window_end_s=1.0,
+            duration_s=1.0,
+            overlap_s=0.5,
+            source_timestamp_s=0.0,
+        )
+        result = render_window(w, tmp_path, 10.0, 1.0, n_frames=3)
+        assert result is not None
+        assert len(result.frame_infos) == 3
+
+        # Decode the rendered frame and check overlay is present
+        frame = cv2.imdecode(np.frombuffer(result.frames[0], dtype=np.uint8), cv2.IMREAD_COLOR)
+        assert frame is not None
+
+        # Sample text region where overlay should be (top-left corner)
+        region = frame[0:25, 0:150]
+        # Green text on dark background — sample center of region for green pixels
+        green_count = np.sum(
+            (region[:, :, 1] > 100) & (region[:, :, 0] < 50) & (region[:, :, 2] < 50)
+        )
+        assert green_count > 0, "No green overlay text found in rendered frame"
+
+        import os
+
+        os.remove(tmp_path)

@@ -17,8 +17,12 @@ class Layer2Event(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    event_type: str = Field(..., description="One of pickup, putdown, restocking, no_event, ambiguous")
-    relative_start_s: float = Field(..., description="Start time relative to window start (seconds)")
+    event_type: str = Field(
+        ..., description="One of pickup, putdown, restocking, no_event, ambiguous"
+    )
+    relative_start_s: float = Field(
+        ..., description="Start time relative to window start (seconds)"
+    )
     relative_end_s: float = Field(..., description="End time relative to window start (seconds)")
     item_count: int = Field(default=1, ge=1, le=10, description="Number of items involved")
     visibility: str = Field(default="visible", description="visible, occluded, partial")
@@ -28,9 +32,7 @@ class Layer2Event(BaseModel):
     @classmethod
     def valid_event_type(cls, v: str) -> str:
         if v not in VALID_EVENT_TYPES:
-            raise ValueError(
-                f"event_type must be one of {VALID_EVENT_TYPES}, got {v!r}"
-            )
+            raise ValueError(f"event_type must be one of {VALID_EVENT_TYPES}, got {v!r}")
         return v
 
     @field_validator("relative_start_s", "relative_end_s")
@@ -78,6 +80,8 @@ class Layer2Prediction(BaseModel):
     """Canonical Layer 2 prediction with absolute timestamps and provenance.
 
     This is the output format used by merge_predictions and evaluation.
+    Two-item events are stored as a single Layer2Prediction with item_count=2;
+    to_canonical() expands them into separate rows per the repository convention.
     """
 
     clip_id: str
@@ -89,6 +93,7 @@ class Layer2Prediction(BaseModel):
     visibility: str = "visible"
     confidence: float = 1.0
     contributing_window_ids: list[str] = Field(default_factory=list)
+    event_group_id: str = ""
     model: str = "layer2_qwen"
 
     @field_validator("t_end_s")
@@ -107,14 +112,23 @@ class Layer2Prediction(BaseModel):
             raise ValueError("confidence must be in [0.0, 1.0]")
         return v
 
-    def to_canonical(self) -> dict[str, Any]:
-        """Convert to Task 8 canonical prediction dict."""
-        return {
-            "clip_id": self.clip_id,
-            "pred_id": self.pred_id,
-            "type": self.event_type,
-            "t_start": self.t_start_s,
-            "t_end": self.t_end_s,
-            "score": self.confidence,
-            "model": self.model,
-        }
+    def to_canonical(self) -> list[dict[str, Any]]:
+        """Expand to one canonical row per item (repository two-item convention).
+
+        item_count=1 → one row. item_count=2 → two rows with same event_group_id.
+        """
+        rows: list[dict[str, Any]] = []
+        for item_index in range(self.item_count):
+            rows.append(
+                {
+                    "clip_id": self.clip_id,
+                    "pred_id": f"{self.pred_id}_item{item_index}",
+                    "type": self.event_type,
+                    "t_start": self.t_start_s,
+                    "t_end": self.t_end_s,
+                    "score": self.confidence,
+                    "model": self.model,
+                    "event_group_id": self.event_group_id,
+                }
+            )
+        return rows

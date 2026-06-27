@@ -107,6 +107,4 @@ def build_prompt(
     fps: float,
 ) -> tuple[str, str]:
     """Build system + user prompt pair for one window."""
-    return SYSTEM_PROMPT, build_user_prompt(
-        window_start_s, window_end_s, frame_count, fps
-    )
+    return SYSTEM_PROMPT, build_user_prompt(window_start_s, window_end_s, frame_count, fps)

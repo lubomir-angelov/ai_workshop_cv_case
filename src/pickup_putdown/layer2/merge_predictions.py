@@ -96,9 +96,7 @@ def merge_predictions(
 
     predictions: list[Layer2Prediction] = []
 
-    for key, events in sorted(
-        groups.items(), key=lambda x: (x[0].clip_id, x[0].event_type)
-    ):
+    for key, events in sorted(groups.items(), key=lambda x: (x[0].clip_id, x[0].event_type)):
         # Sort by start time for deterministic merging
         events.sort(key=lambda e: (e["t_start"], e["t_end"]))
 
@@ -137,6 +135,8 @@ def merge_predictions(
             for m_start, m_end in merged_intervals:
                 pred_id = _make_pred_id(key.clip_id, key.event_type, m_start, m_end)
                 contributing = list({e["window_id"] for e in group})
+                # Two-item convention: shared group_id across all items
+                group_id = pred_id if max_items > 1 else ""
 
                 predictions.append(
                     Layer2Prediction(
@@ -148,6 +148,7 @@ def merge_predictions(
                         item_count=max_items,
                         confidence=max_conf,
                         contributing_window_ids=sorted(contributing),
+                        event_group_id=group_id,
                     )
                 )
 

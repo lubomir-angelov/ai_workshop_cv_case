@@ -113,6 +113,18 @@ def render_window(
                 new_h = int(h * scale)
                 frame = cv2.resize(frame, (new_w, new_h))
 
+            # Overlay visible timestamp and frame number for VLM reference
+            overlay_text = f"frame={frame_idx}  t={t_rel:.1f}s"
+            cv2.putText(
+                frame,
+                overlay_text,
+                (8, 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                1,
+            )
+
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             frames_bytes = buf.tobytes()
 
