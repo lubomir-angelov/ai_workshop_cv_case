@@ -1,0 +1,12 @@
+# Safe example. Supply credentials through environment variables.
+storage:
+  bucket_uri: "s3://example-bucket/example-prefix/"
+  region: "example-region"
+  endpoint_url: null
+  anonymous: false
+
+cache:
+  base_dir: "cache/downloads"
+  max_size_mb: 5120
+  max_count: 50
+
