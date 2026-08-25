@@ -22,7 +22,6 @@ import csv
 import hashlib
 import json
 import logging
-import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +29,12 @@ from typing import Any
 
 import numpy as np
 
+from pickup_putdown.common.geometry import (
+    BOUNDARY_EXCLUSIVE,
+    point_in_polygon,
+    point_to_polygon_distance,
+    polygon_to_array,
+)
 from pickup_putdown.layer1.track_a.classifier import (
     ClassifierMetadata,
     TrackAClassifier,
@@ -743,6 +748,8 @@ def build_observations(
     if not all_timestamps:
         return []
 
+    shelf_polygon = polygon_to_array(shelf_region)
+
     observations: list[TrackAObservation] = []
 
     for ts in all_timestamps:
@@ -758,8 +765,12 @@ def build_observations(
         inside = False
         dist_px: float | None = None
         if wrist_x is not None and wrist_y is not None and shelf_region:
-            inside = _point_in_polygon(float(wrist_x), float(wrist_y), shelf_region)
-            dist_px = _point_to_polygon_distance(float(wrist_x), float(wrist_y), shelf_region)
+            inside = bool(
+                point_in_polygon(float(wrist_x), float(wrist_y), shelf_polygon, BOUNDARY_EXCLUSIVE)
+            )
+            dist_px = float(
+                point_to_polygon_distance(float(wrist_x), float(wrist_y), shelf_polygon)
+            )
 
         obs = TrackAObservation(
             clip_id=clip_id,
@@ -798,49 +809,6 @@ def _find_nearest_pose(
     nearest = min(poses, key=lambda p: abs(getattr(p, "timestamp_s", 0.0) - timestamp_s))
     diff = abs(getattr(nearest, "timestamp_s", 0.0) - timestamp_s)
     return nearest if diff <= max_tolerance_s else None
-
-
-def _point_in_polygon(px: float, py: float, polygon: list[tuple[float, float]]) -> bool:
-    """Ray-casting point-in-polygon test."""
-    if len(polygon) < 3:
-        return False
-    inside = False
-    n = len(polygon)
-    for i in range(n):
-        x1, y1 = polygon[i]
-        x2, y2 = polygon[(i + 1) % n]
-        crosses = (y1 > py) != (y2 > py)
-        if crosses:
-            ix = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
-            if px < ix:
-                inside = not inside
-    return inside
-
-
-def _point_to_polygon_distance(px: float, py: float, polygon: list[tuple[float, float]]) -> float:
-    """Minimum distance from point to polygon edges."""
-    if not polygon:
-        return float("inf")
-    min_d = float("inf")
-    n = len(polygon)
-    for i in range(n):
-        x1, y1 = polygon[i]
-        x2, y2 = polygon[(i + 1) % n]
-        d = _point_to_segment_distance(px, py, x1, y1, x2, y2)
-        min_d = min(min_d, d)
-    return min_d
-
-
-def _point_to_segment_distance(
-    px: float, py: float, x1: float, y1: float, x2: float, y2: float
-) -> float:
-    dx = x2 - x1
-    dy = y2 - y1
-    len_sq = dx * dx + dy * dy
-    if len_sq < 1e-12:
-        return math.hypot(px - x1, py - y1)
-    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / len_sq))
-    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 
 
 # ---------------------------------------------------------------------------

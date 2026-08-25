@@ -13,6 +13,15 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
+
+from pickup_putdown.common.geometry import (
+    BOUNDARY_EXCLUSIVE,
+    points_in_polygon,
+    points_to_polygon_distance,
+    polygon_to_array,
+)
+
 if TYPE_CHECKING:
     from pickup_putdown.common.schemas import Candidate, PoseObservation
     from pickup_putdown.config import TrackAFeaturesConfig
@@ -208,113 +217,25 @@ def find_shelf_entry_point(
     # Sort by timestamp
     window_obs.sort(key=lambda obs: obs.timestamp_s)
 
+    polygon = polygon_to_array(shelf_region)
+    xs = np.array([obs.wrist_x for obs in window_obs], dtype=np.float64)
+    ys = np.array([obs.wrist_y for obs in window_obs], dtype=np.float64)
+    inside_mask = points_in_polygon(xs, ys, polygon, BOUNDARY_EXCLUSIVE)
+
     # Look for transition from outside to inside
-    previous_inside = None
-    for obs in window_obs:
-        inside = _point_in_polygon(obs.wrist_x, obs.wrist_y, shelf_region)
-
-        if previous_inside is False and inside is True:
+    for index in range(1, len(window_obs)):
+        if not inside_mask[index - 1] and inside_mask[index]:
             # Found entry point
-            return obs.timestamp_s
-
-        previous_inside = inside
+            return window_obs[index].timestamp_s
 
     # No clear entry transition found
     # Return timestamp of first observation inside the region
-    for obs in window_obs:
-        if _point_in_polygon(obs.wrist_x, obs.wrist_y, shelf_region):
-            return obs.timestamp_s
+    if inside_mask.any():
+        return window_obs[int(np.argmax(inside_mask))].timestamp_s
 
     # No observation inside the region - return the observation closest to region
-    min_dist = float("inf")
-    closest_time = None
-
-    for obs in window_obs:
-        dist = _point_to_polygon_distance(obs.wrist_x, obs.wrist_y, shelf_region)
-        if dist < min_dist:
-            min_dist = dist
-            closest_time = obs.timestamp_s
-
-    return closest_time
-
-
-def _point_in_polygon(px: float, py: float, polygon: Polygon) -> bool:
-
-    # If we imagine Polygon as set of edges, a point would be outside if for edge_i we have edge_j
-    # Where edge_i and edge_j are intersected by the same y axis of the ray but x_i < x_j
-    # Note realistically for "un-logical" polygons we would again have even number of pairs |{e_i1,  e_j1}, ..... {e_ik, e_jk})| MOD2 == 0
-
-    if len(polygon) < 3:
-        return False
-
-    inside = False
-    previous_index = len(polygon) - 1
-
-    for current_index in range(len(polygon)):
-        current_x, current_y = polygon[current_index]
-        previous_x, previous_y = polygon[previous_index]
-
-        crosses_horizontal_line = (current_y > py) != (previous_y > py)
-
-        if crosses_horizontal_line:
-            intersection_x = current_x + (py - current_y) * (previous_x - current_x) / (
-                previous_y - current_y
-            )
-
-            if px < intersection_x:
-                inside = not inside
-
-        previous_index = current_index
-
-    return inside
-
-
-def _point_to_polygon_distance(px: float, py: float, polygon: Polygon) -> float:
-    """Calculate minimum distance from a point to a polygon's edges."""
-
-    # Let Euclidian distance between point x and edge u inside the polygon be dist[x, u];
-    # Return min(ALL: dist[x, u_i])
-
-    if not polygon:
-        return float("inf")
-
-    min_dist = float("inf")
-    n = len(polygon)
-
-    for i in range(n):
-        x1, y1 = polygon[i]
-        x2, y2 = polygon[(i + 1) % n]
-
-        dist = _point_to_segment_distance(px, py, x1, y1, x2, y2)
-        min_dist = min(min_dist, dist)
-
-    return min_dist
-
-
-def _point_to_segment_distance(
-    px: float,
-    py: float,
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-) -> float:
-    """Calculate the distance from a point to a line segment."""
-    dx = x2 - x1
-    dy = y2 - y1
-    length_sq = dx * dx + dy * dy
-
-    if length_sq < 1e-12:
-        # Segment is essentially a point
-        return math.hypot(px - x1, py - y1)
-
-    # Project point onto line, clamped to segment
-    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / length_sq))
-
-    proj_x = x1 + t * dx
-    proj_y = y1 + t * dy
-
-    return math.hypot(px - proj_x, py - proj_y)
+    distances = points_to_polygon_distance(xs, ys, polygon)
+    return window_obs[int(np.argmin(distances))].timestamp_s
 
 
 def get_wrist_trajectory_for_candidate(
