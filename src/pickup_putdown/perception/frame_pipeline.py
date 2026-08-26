@@ -398,7 +398,8 @@ class DecoderPool:
         self._workers: list[mp.Process] = []
         self._shared_buffer: SharedFrameBuffer | None = None
         self._frame_queue: mp.Queue | None = None
-        self._slot_queue: mp.Queue | None = None
+        self._slot_queues: list[mp.Queue] = []
+        self._slot_owner: list[int] = []
         self._error_queue: mp.Queue | None = None
         self._shutdown_event: mp.Event | None = None
         self._sample_index_maps: list[dict[int, int]] = []
@@ -431,13 +432,29 @@ class DecoderPool:
             frame_width=self.frame_width,
         )
         self._frame_queue = mp.Queue()
-        self._slot_queue = mp.Queue()
         self._error_queue = mp.Queue()
         self._shutdown_event = mp.Event()
 
-        # Pre-fill slot queue with available slots
-        for i in range(self.queue_depth):
-            self._slot_queue.put(i)
+        # Partition the slot pool per worker. Workers now decode much faster
+        # than the ordered consumer processes, so with a shared pool a worker
+        # that runs more than queue_depth samples ahead of a slower sibling
+        # can pin every slot with frames the consumer cannot use yet, while
+        # the slower worker starves waiting for a slot to produce the very
+        # frame the consumer needs (deadlock). A dedicated budget per worker
+        # means a runaway worker only ever blocks on its own slots.
+        if self.queue_depth < self.n_workers:
+            raise ValueError(
+                f"queue_depth ({self.queue_depth}) must be >= n_workers ({self.n_workers})"
+            )
+        self._slot_queues = [mp.Queue() for _ in range(self.n_workers)]
+        self._slot_owner = [0] * self.queue_depth
+        base_slots, extra_slots = divmod(self.queue_depth, self.n_workers)
+        slot = 0
+        for i in range(self.n_workers):
+            for _ in range(base_slots + (1 if i < extra_slots else 0)):
+                self._slot_queues[i].put(slot)
+                self._slot_owner[slot] = i
+                slot += 1
 
         # Split frames across workers interleaved (worker i takes samples
         # i, i+n, i+2n, ...). Interleaving keeps all workers producing frames
@@ -465,7 +482,7 @@ class DecoderPool:
                     worker_frames,
                     source_fps,
                     self._frame_queue,
-                    self._slot_queue,
+                    self._slot_queues[i],
                     self._error_queue,
                     self._shutdown_event,
                     self._shared_buffer.name,
@@ -539,15 +556,15 @@ class DecoderPool:
         return frame, metadata
 
     def return_slot(self, slot_index: int) -> None:
-        """Return a slot to the pool for reuse.
+        """Return a slot to its owning worker's queue for reuse.
 
         Parameters
         ----------
         slot_index : int
             Index of the slot to return.
         """
-        if self._slot_queue is not None:
-            self._slot_queue.put(slot_index)
+        if self._slot_queues:
+            self._slot_queues[self._slot_owner[slot_index]].put(slot_index)
 
     def stop(self) -> None:
         """Stop all decoder workers and clean up resources."""
@@ -577,7 +594,7 @@ class DecoderPool:
                 logger.warning("Error cleaning up shared memory: %s", e)
 
         # Clean up queues
-        for queue in [self._frame_queue, self._slot_queue, self._error_queue]:
+        for queue in [self._frame_queue, *self._slot_queues, self._error_queue]:
             if queue is not None:
                 try:
                     queue.close()
@@ -588,7 +605,8 @@ class DecoderPool:
         self._workers = []
         self._shared_buffer = None
         self._frame_queue = None
-        self._slot_queue = None
+        self._slot_queues = []
+        self._slot_owner = []
         self._error_queue = None
         self._shutdown_event = None
         self._active = False
