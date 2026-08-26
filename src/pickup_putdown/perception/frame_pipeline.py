@@ -205,7 +205,10 @@ def _decoder_worker(
     video_path : str
         Path to the video file.
     sample_frames : list[int]
-        List of source frame indices this worker should decode.
+        Sorted ascending source frame indices this worker should decode.
+        The worker seeks once to the first index, then advances the decoder
+        linearly (grab past unsampled frames, retrieve sampled ones) to
+        avoid the per-frame keyframe seek cost of CAP_PROP_POS_FRAMES.
     source_fps : float
         Source video FPS for timestamp calculation.
     frame_queue : Queue[FrameMetadata | None]
@@ -262,9 +265,38 @@ def _decoder_worker(
             video_path,
         )
 
+        # Seek once to this worker's first sample, then decode strictly
+        # forward. Sample frames are sparse (e.g. 3 of every 20), but H.264
+        # delta frames must be decoded in sequence anyway, so grab()
+        # (decode-only) past unsampled frames is far cheaper than a
+        # CAP_PROP_POS_FRAMES seek per sample, which re-decodes from the
+        # previous keyframe every time (GOPs in the source videos span
+        # hundreds of frames).
+        decoder_position = sample_frames[0] if sample_frames else 0
+        if decoder_position > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, decoder_position)
+
+        stream_ended = False
         for idx, src_frame_idx in enumerate(sample_frames):
             if shutdown_event.is_set():
                 logger.debug("Worker %d: shutdown requested, exiting", worker_id)
+                break
+            if stream_ended:
+                break
+
+            # Advance the decoder to the sampled frame without materializing
+            # the intermediate frames.
+            while decoder_position < src_frame_idx:
+                if not cap.grab():
+                    logger.warning(
+                        "Worker %d: video ended while advancing to frame %d",
+                        worker_id,
+                        src_frame_idx,
+                    )
+                    stream_ended = True
+                    break
+                decoder_position += 1
+            if stream_ended:
                 break
 
             # Get an available slot (blocks if buffer is full)
@@ -275,9 +307,8 @@ def _decoder_worker(
                     break
                 raise TimeoutError(f"Worker {worker_id}: timeout waiting for slot")
 
-            # Seek and read frame
-            cap.set(cv2.CAP_PROP_POS_FRAMES, src_frame_idx)
             ret, frame = cap.read()
+            decoder_position += 1
 
             if not ret:
                 logger.warning(
@@ -285,9 +316,10 @@ def _decoder_worker(
                     worker_id,
                     src_frame_idx,
                 )
-                # Return slot and continue
+                # Return slot and stop: a failed sequential read means the
+                # stream ended, so later frames cannot be read either.
                 slot_queue.put(slot_index)
-                continue
+                break
 
             # Resize if needed
             if resize_frames:
@@ -330,6 +362,10 @@ class DecoderPool:
 
     This class handles starting and stopping decoder worker processes,
     distributing frames across workers, and coordinating shared memory.
+    Frames are assigned interleaved (worker i takes every n-th sample) so
+    all workers stay near the ordered consumer's position; each worker's
+    ascending list is decoded sequentially with grab/retrieve instead of a
+    keyframe seek per sampled frame.
 
     Parameters
     ----------
@@ -403,7 +439,14 @@ class DecoderPool:
         for i in range(self.queue_depth):
             self._slot_queue.put(i)
 
-        # Split frames across workers (interleaved for better distribution)
+        # Split frames across workers interleaved (worker i takes samples
+        # i, i+n, i+2n, ...). Interleaving keeps all workers producing frames
+        # near the consumer's current position: the consumer must process
+        # frames in global order (ByteTrack), and the bounded slot pool
+        # deadlocks if one worker races far ahead of the others, as a
+        # contiguous-chunk assignment would cause. Each worker's list is
+        # still strictly ascending, so workers decode sequentially (see
+        # _decoder_worker) instead of seeking per frame.
         self._sample_index_maps = []
         for i in range(self.n_workers):
             worker_frames = sample_frames[i :: self.n_workers]
