@@ -21,6 +21,8 @@ dependencies = [
     "lap>=0.5.12",
     "numpy>=1.26",
     "scipy>=1.12",
+    "scikit-learn>=1.4",
+    "joblib>=1.3",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +35,11 @@ dev = [
 ]
 viz = [
     "Pillow>=9.0",
+]
+track_b1 = [
+    "torch>=2.0",
+    "transformers>=4.35",
+    "accelerate>=0.25",
 ]
 
 [project.scripts]
@@ -48,6 +55,9 @@ line-length = 99
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "A", "C4", "SIM", "TID"]
 ignore = ["E501", "SIM105"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["N806", "B905"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["pickup_putdown"]
