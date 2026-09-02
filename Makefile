@@ -42,6 +42,11 @@ CLIPS ?= $(TRIAGE_OUTPUT)/clips.parquet
 #   make tasks-3-5 VIDEO=/path/video.mp4 RENDER_PREVIEWS=0
 RENDER_PREVIEWS ?= 1
 
+# Task 3 triage QA previews are for human review only; no downstream task
+# consumes them, so batch runs skip them by default. Enable with:
+#   make task-3 VIDEO=/path/video.mp4 TRIAGE_RENDER_PREVIEWS=1
+TRIAGE_RENDER_PREVIEWS ?= 0
+
 # Explicit VIDEO=/path is recommended. This fallback selects the first local MP4.
 DEFAULT_VIDEO := $(shell find .local \
 	-type f \
@@ -208,6 +213,7 @@ task-3: $(PERSON_MODEL) ## Run Task 3 person triage for VIDEO
 		--config "$(TRIAGE_CONFIG)" \
 		--tracker-config "$(TRACKER_CONFIG)" \
 		--output-dir "$(TRIAGE_OUTPUT)" \
+		$(if $(filter 1 true yes,$(TRIAGE_RENDER_PREVIEWS)),--render-previews,) \
 		--verbose \
 		2>&1 | tee "$(TRIAGE_OUTPUT)/task_3.log"
 	@test -f "$(PERSON_TRACKS)" || \

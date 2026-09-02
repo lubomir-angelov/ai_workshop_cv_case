@@ -20,7 +20,16 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 
+import numpy as np
+
 from pickup_putdown.common.exceptions import ConfigError, ValidationError
+from pickup_putdown.common.geometry import (
+    points_in_polygon,
+    points_to_polygon_distance,
+    polygon_to_array,
+    trajectory_speeds,
+    velocity_reversals,
+)
 from pickup_putdown.common.schemas import (
     Candidate,
     PersonObservation,
@@ -352,8 +361,13 @@ def compute_region_measurements(
     the expanded polygon are not discarded, which preserves approach, entry,
     exit, speed, dwell, and reversal evidence.
     """
-    original_regions = {region.region_id: region.points for region in camera_config.regions}
-    expanded_regions = _get_expanded_regions(camera_config, region_cfg)
+    original_arrays = {
+        region.region_id: polygon_to_array(region.points) for region in camera_config.regions
+    }
+    expanded_arrays = {
+        region_id: polygon_to_array(points)
+        for region_id, points in _get_expanded_regions(camera_config, region_cfg).items()
+    }
 
     groups: dict[tuple[str, str, str], list[PoseObservation]] = defaultdict(list)
     for pose in pose_observations:
@@ -368,28 +382,31 @@ def compute_region_measurements(
     for (clip_id, actor_id, hand_side), poses in groups.items():
         poses.sort(key=lambda item: (item.timestamp_s, item.source_frame_index))
 
-        for region_id, original_polygon in original_regions.items():
-            expanded_polygon = expanded_regions[region_id]
+        xs = np.array([pose.wrist_x for pose in poses], dtype=np.float64)
+        ys = np.array([pose.wrist_y for pose in poses], dtype=np.float64)
+        ts = np.array([pose.timestamp_s for pose in poses], dtype=np.float64)
+
+        # Speed and reversal depend only on the trajectory, not the region.
+        speeds = trajectory_speeds(xs, ys, ts)
+        reversals = velocity_reversals(
+            xs,
+            ys,
+            reversal_window,
+            float(region_cfg.reversal_threshold),
+        )
+
+        for region_id, original_polygon in original_arrays.items():
+            expanded_polygon = expanded_arrays[region_id]
+            inside_original_mask = points_in_polygon(xs, ys, original_polygon, _BOUNDARY_TOL)
+            inside_expanded_mask = points_in_polygon(xs, ys, expanded_polygon, _BOUNDARY_TOL)
+            distances = points_to_polygon_distance(xs, ys, original_polygon)
+
             measurements: list[_RegionMeasurement] = []
             entry_time: float | None = None
             previous_inside_expanded: bool | None = None
 
             for index, pose in enumerate(poses):
-                inside_original = _point_in_polygon(
-                    pose.wrist_x,
-                    pose.wrist_y,
-                    original_polygon,
-                )
-                inside_expanded = _point_in_polygon(
-                    pose.wrist_x,
-                    pose.wrist_y,
-                    expanded_polygon,
-                )
-                distance = _point_to_polygon_distance(
-                    pose.wrist_x,
-                    pose.wrist_y,
-                    original_polygon,
-                )
+                inside_expanded = bool(inside_expanded_mask[index])
 
                 entry_event = inside_expanded and previous_inside_expanded is not True
                 exit_event = not inside_expanded and previous_inside_expanded is True
@@ -405,39 +422,19 @@ def compute_region_measurements(
                     else 0.0
                 )
 
-                speed = 0.0
-                if index > 0:
-                    previous = poses[index - 1]
-                    dt = pose.timestamp_s - previous.timestamp_s
-                    if dt > 0.0:
-                        speed = (
-                            math.hypot(
-                                pose.wrist_x - previous.wrist_x,
-                                pose.wrist_y - previous.wrist_y,
-                            )
-                            / dt
-                        )
-
-                reversal = _has_velocity_reversal(
-                    poses,
-                    index,
-                    reversal_window,
-                    float(region_cfg.reversal_threshold),
-                )
-
                 measurements.append(
                     _RegionMeasurement(
                         wrist_x=pose.wrist_x,
                         wrist_y=pose.wrist_y,
                         wrist_confidence=pose.wrist_confidence,
-                        distance=distance,
-                        inside_region=inside_original,
+                        distance=float(distances[index]),
+                        inside_region=bool(inside_original_mask[index]),
                         inside_expanded=inside_expanded,
                         entry_event=entry_event,
                         exit_event=exit_event,
                         dwell_duration_s=dwell_duration,
-                        speed=speed,
-                        velocity_reversal=reversal,
+                        speed=float(speeds[index]),
+                        velocity_reversal=bool(reversals[index]),
                     )
                 )
                 previous_inside_expanded = inside_expanded
@@ -445,36 +442,6 @@ def compute_region_measurements(
             result[f"{clip_id}:{actor_id}:{hand_side}:{region_id}"] = measurements
 
     return result
-
-
-def _has_velocity_reversal(
-    poses: list[PoseObservation],
-    index: int,
-    window: int,
-    reversal_threshold: float,
-) -> bool:
-    if index < 2 * window:
-        return False
-
-    first = poses[index - 2 * window]
-    middle = poses[index - window]
-    current = poses[index]
-
-    previous_dx = middle.wrist_x - first.wrist_x
-    previous_dy = middle.wrist_y - first.wrist_y
-    current_dx = current.wrist_x - middle.wrist_x
-    current_dy = current.wrist_y - middle.wrist_y
-
-    previous_magnitude = math.hypot(previous_dx, previous_dy)
-    current_magnitude = math.hypot(current_dx, current_dy)
-    if previous_magnitude <= 1e-9 or current_magnitude <= 1e-9:
-        return False
-
-    cosine = (previous_dx * current_dx + previous_dy * current_dy) / (
-        previous_magnitude * current_magnitude
-    )
-    cosine = max(-1.0, min(1.0, cosine))
-    return cosine < -reversal_threshold
 
 
 def _get_expanded_regions(
@@ -510,8 +477,13 @@ def detect_raw_interactions(
     if not pose_observations:
         return []
 
-    original_regions = {region.region_id: region.points for region in camera_config.regions}
-    expanded_regions = _get_expanded_regions(camera_config, region_cfg)
+    original_arrays = {
+        region.region_id: polygon_to_array(region.points) for region in camera_config.regions
+    }
+    expanded_arrays = {
+        region_id: polygon_to_array(points)
+        for region_id, points in _get_expanded_regions(camera_config, region_cfg).items()
+    }
 
     grouped_poses: dict[tuple[str, str, str], list[PoseObservation]] = defaultdict(list)
     for pose in pose_observations:
@@ -536,6 +508,9 @@ def detect_raw_interactions(
     for (clip_id, actor_id, hand_side), poses in grouped_poses.items():
         poses.sort(key=lambda item: (item.timestamp_s, item.source_frame_index))
 
+        xs = np.array([pose.wrist_x for pose in poses], dtype=np.float64)
+        ys = np.array([pose.wrist_y for pose in poses], dtype=np.float64)
+
         # Tests, imported fixtures, and lower-rate acceptance runs may have a
         # cadence different from proposals_cfg.target_fps. Infer the normal
         # cadence from the trajectory while capping the tolerated gap so a
@@ -557,8 +532,20 @@ def detect_raw_interactions(
             observed_gap_tolerance,
         )
 
-        for region_id, expanded_polygon in expanded_regions.items():
-            original_polygon = original_regions[region_id]
+        # Multiple pose rows may share an actor, hand, and timestamp
+        # (for example, synthetic fixtures or duplicate detections). For
+        # each region, collapse such rows into one timestamp-level state.
+        # A non-qualifying row at the same timestamp must not terminate a
+        # qualifying interaction from another row.
+        indices_by_timestamp: dict[float, list[int]] = defaultdict(list)
+        for pose_index, pose in enumerate(poses):
+            indices_by_timestamp[float(pose.timestamp_s)].append(pose_index)
+        sorted_timestamps = sorted(indices_by_timestamp)
+
+        for region_id, expanded_polygon in expanded_arrays.items():
+            original_polygon = original_arrays[region_id]
+            inside_expanded_mask = points_in_polygon(xs, ys, expanded_polygon, _BOUNDARY_TOL)
+            original_distances = points_to_polygon_distance(xs, ys, original_polygon)
 
             start_s: float | None = None
             last_qualifying_s: float | None = None
@@ -602,17 +589,8 @@ def detect_raw_interactions(
                 distance_sum = 0.0
                 observation_count = 0
 
-            # Multiple pose rows may share an actor, hand, and timestamp
-            # (for example, synthetic fixtures or duplicate detections). For
-            # each region, collapse such rows into one timestamp-level state.
-            # A non-qualifying row at the same timestamp must not terminate a
-            # qualifying interaction from another row.
-            poses_by_timestamp: dict[float, list[PoseObservation]] = defaultdict(list)
-            for pose in poses:
-                poses_by_timestamp[float(pose.timestamp_s)].append(pose)
-
-            for timestamp in sorted(poses_by_timestamp):
-                timestamp_poses = poses_by_timestamp[timestamp]
+            for timestamp in sorted_timestamps:
+                timestamp_indices = indices_by_timestamp[timestamp]
 
                 if (
                     start_s is not None
@@ -621,32 +599,24 @@ def detect_raw_interactions(
                 ):
                     flush()
 
-                qualifying_poses = [
-                    pose
-                    for pose in timestamp_poses
-                    if getattr(pose, "is_valid", True) is not False
-                    and pose.wrist_confidence >= minimum_confidence
-                    and _point_in_polygon(
-                        pose.wrist_x,
-                        pose.wrist_y,
-                        expanded_polygon,
-                    )
+                qualifying_indices = [
+                    pose_index
+                    for pose_index in timestamp_indices
+                    if getattr(poses[pose_index], "is_valid", True) is not False
+                    and poses[pose_index].wrist_confidence >= minimum_confidence
+                    and inside_expanded_mask[pose_index]
                 ]
 
-                if qualifying_poses:
+                if qualifying_indices:
                     # Prefer the most confident observation. Distance is a
                     # deterministic tie-breaker that favors the region-local
                     # wrist when duplicate detections exist.
-                    pose = max(
-                        qualifying_poses,
-                        key=lambda item: (
-                            item.wrist_confidence,
-                            -_point_to_polygon_distance(
-                                item.wrist_x,
-                                item.wrist_y,
-                                original_polygon,
-                            ),
-                            -(getattr(item, "source_frame_index", 0) or 0),
+                    best_index = max(
+                        qualifying_indices,
+                        key=lambda pose_index: (
+                            poses[pose_index].wrist_confidence,
+                            -original_distances[pose_index],
+                            -(getattr(poses[pose_index], "source_frame_index", 0) or 0),
                         ),
                     )
 
@@ -654,12 +624,8 @@ def detect_raw_interactions(
                         start_s = timestamp
                     last_qualifying_s = timestamp
                     observation_count += 1
-                    confidence_sum += pose.wrist_confidence
-                    distance_sum += _point_to_polygon_distance(
-                        pose.wrist_x,
-                        pose.wrist_y,
-                        original_polygon,
-                    )
+                    confidence_sum += poses[best_index].wrist_confidence
+                    distance_sum += float(original_distances[best_index])
                 elif (
                     start_s is not None
                     and last_qualifying_s is not None
@@ -1040,80 +1006,9 @@ def _intervals_overlap(
 # Geometry helpers
 # ---------------------------------------------------------------------------
 
-
-def _point_in_polygon(px: float, py: float, polygon: Polygon) -> bool:
-    """Return whether a point is inside or on the boundary of a polygon."""
-    if len(polygon) < 3:
-        return False
-
-    for index in range(len(polygon)):
-        next_index = (index + 1) % len(polygon)
-        if (
-            _point_to_segment_distance(
-                px,
-                py,
-                polygon[index][0],
-                polygon[index][1],
-                polygon[next_index][0],
-                polygon[next_index][1],
-            )
-            <= 1e-9
-        ):
-            return True
-
-    inside = False
-    previous_index = len(polygon) - 1
-    for index, (current_x, current_y) in enumerate(polygon):
-        previous_x, previous_y = polygon[previous_index]
-        crosses = (current_y > py) != (previous_y > py)
-        if crosses:
-            x_at_y = (previous_x - current_x) * (py - current_y) / (
-                previous_y - current_y
-            ) + current_x
-            if px < x_at_y:
-                inside = not inside
-        previous_index = index
-    return inside
-
-
-def _point_to_polygon_distance(px: float, py: float, polygon: Polygon) -> float:
-    """Compute minimum distance from a point to polygon edges."""
-    if not polygon:
-        return float("inf")
-
-    return min(
-        _point_to_segment_distance(
-            px,
-            py,
-            polygon[index][0],
-            polygon[index][1],
-            polygon[(index + 1) % len(polygon)][0],
-            polygon[(index + 1) % len(polygon)][1],
-        )
-        for index in range(len(polygon))
-    )
-
-
-def _point_to_segment_distance(
-    px: float,
-    py: float,
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-) -> float:
-    """Minimum distance from a point to a line segment."""
-    dx = x2 - x1
-    dy = y2 - y1
-    length_squared = dx * dx + dy * dy
-    if length_squared <= 0.0:
-        return math.hypot(px - x1, py - y1)
-
-    projection = ((px - x1) * dx + (py - y1) * dy) / length_squared
-    projection = max(0.0, min(1.0, projection))
-    projected_x = x1 + projection * dx
-    projected_y = y1 + projection * dy
-    return math.hypot(px - projected_x, py - projected_y)
+# Proposals treat points on a polygon boundary as inside. The compiled kernels
+# in pickup_putdown.common.geometry accept this as an edge-distance tolerance.
+_BOUNDARY_TOL: float = 1e-9
 
 
 # ---------------------------------------------------------------------------
