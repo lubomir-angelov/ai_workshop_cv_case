@@ -246,15 +246,36 @@ class PoseTracker:
             raise RuntimeError(f"Could not open video: {self.video_path}")
 
         all_observations: list[PoseObservation] = []
-        max_required_frame = max(active_frames)
+        ordered_frames = sorted(active_frames)
         processed_frames = 0
-        frame_index = 0
 
         try:
-            # Sequential decoding is substantially faster than seeking with
-            # CAP_PROP_POS_FRAMES for every sampled frame.
-            while frame_index <= max_required_frame:
+            # Seek once to the first active frame, then advance strictly
+            # forward: grab() (decode-only) past inactive frames and
+            # materialize only active ones. A read() of an inactive 4K frame
+            # pays a BGR conversion + copy that grab() avoids, and the seek
+            # skips everything before the first active span.
+            decoder_position = ordered_frames[0]
+            if decoder_position > 0:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, decoder_position)
+
+            stream_ended = False
+            for frame_index in ordered_frames:
+                while decoder_position < frame_index:
+                    if not cap.grab():
+                        logger.warning(
+                            "Video ended while advancing to frame %d of %s",
+                            frame_index,
+                            self.video_path,
+                        )
+                        stream_ended = True
+                        break
+                    decoder_position += 1
+                if stream_ended:
+                    break
+
                 ret, frame = cap.read()
+                decoder_position += 1
                 if not ret:
                     logger.warning(
                         "Video ended while reading frame %d of %s",
@@ -262,10 +283,6 @@ class PoseTracker:
                         self.video_path,
                     )
                     break
-
-                if frame_index not in active_frames:
-                    frame_index += 1
-                    continue
 
                 processed_frames += 1
                 timestamp_s = min(
@@ -286,13 +303,11 @@ class PoseTracker:
                 )
 
                 if not results:
-                    frame_index += 1
                     continue
 
                 result = results[0]
                 boxes = result.boxes
                 if boxes is None or boxes.xyxy is None:
-                    frame_index += 1
                     continue
 
                 n_detections = len(boxes.xyxy)
@@ -342,8 +357,6 @@ class PoseTracker:
                                 is_valid=True,
                             )
                         )
-
-                frame_index += 1
         finally:
             cap.release()
 
