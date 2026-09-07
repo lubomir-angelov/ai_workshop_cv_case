@@ -35,7 +35,7 @@ Implement a remote batch-processing workflow that:
 
 7. Encodes all generated candidate clips as browser-compatible H.264 MP4.
 
-8. Uploads the candidates back to S3 for direct use by local Label Studio instances.
+8. Uploads the candidates back to S3 for annotation review (CVAT) and provenance matching.
 
 9. Marks each source video as processed only after its candidate-processing outputs have been successfully uploaded.
 
@@ -67,7 +67,7 @@ s3://chillnbite-cameras/anon/
         └── <run_id>.json
 ```
 
-Label Studio source storage should point only to:
+Annotation tooling should point only to:
 
 ```text
 s3://chillnbite-cameras/anon/candidates/videos/
@@ -355,7 +355,7 @@ candidate_encoding:
 
 Using `libx264` is preferred initially because the remote server has substantial CPU capacity and GPU resources may be needed by the perception pipeline.
 
-Hardware H.264 encoding may be added as a configurable alternative, but it must generate equivalent Label Studio-compatible output.
+Hardware H.264 encoding may be added as a configurable alternative, but it must generate equivalent browser-compatible H.264 output.
 
 ---
 
@@ -491,7 +491,7 @@ The remote process requires:
 * write access to `anon/process_for_candidates.csv`;
 * write access to `anon/candidates/`.
 
-Local Label Studio participants require read access only to:
+Annotators (CVAT) require read access only to:
 
 ```text
 anon/candidates/videos/
@@ -588,7 +588,7 @@ The task is complete when:
 11. Candidate metadata maps each candidate back to the original source video and timeline.
 12. A source video is marked processed only after successful candidate and metadata publication.
 13. Failed and interrupted videos remain eligible for a later retry.
-14. Local Label Studio instances can load the candidate clips directly from S3.
+14. Candidate clips can be loaded directly from S3 for annotation review.
 15. No AWS credentials are stored in source control.
 
 ---
@@ -614,7 +614,7 @@ Validate:
 * candidates exist in S3;
 * candidate metadata is correct;
 * every candidate passes `ffprobe`;
-* local Label Studio can load and seek through the videos.
+* the annotation tooling can load and seek through the videos.
 
 ### First production batch
 
@@ -640,11 +640,11 @@ Tune the worker counts after observing:
 
 ## Non-goals
 
-* Hosting Label Studio on the remote server.
+* Hosting the annotation tool on the remote server.
 * Copying candidate videos into each participant’s local filesystem.
-* Merging local Label Studio annotation exports.
+* Merging annotation exports from the annotation tool (CVAT).
 * Modifying the original source videos.
 * Distributed processing across multiple remote servers.
 * Multiple simultaneous processes updating `process_for_candidates.csv`.
 * Reimplementing Tasks 3–5.
-* Automatically creating Label Studio annotations.
+* Automatically creating annotations in the annotation tool.

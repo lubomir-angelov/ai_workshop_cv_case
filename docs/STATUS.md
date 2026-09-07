@@ -10,7 +10,7 @@ Pickup and putdown event detection in store video.
 | 2 | Person triage, active spans, ByteTrack | ✅ Done |
 | 3 | Pose inference, shelf regions, actor association | ✅ Done |
 | 4 | Candidate proposal generation, previews | ✅ Done |
-| 5 | Label Studio annotation, export, manifest validation | ✅ Done |
+| 5 | CVAT online annotation (source video), export conversion | ✅ Done |
 | 6 | Remote candidate pipeline (S3 download/generate/upload) | ✅ Done |
 | 7 | VLM annotation (Qwen3.6), reviewed JSONs | ✅ Done |
 | 8 | Shared evaluation framework, canonical export | ✅ Done |
@@ -394,6 +394,20 @@ make evaluate-track-a TRACK_A_EVAL_SPLIT=val TRACK_A_EVAL_LIMIT=2
 ```bash
 make evaluate-track-a TRACK_A_EVAL_SPLIT=val
 ```
+
+## Data Locations (S3: `s3://chillnbite-cameras/anon/`)
+
+| Prefix | Count | Content |
+|--------|-------|---------|
+| `anon/*.mp4` (root) | ~395 | Source videos |
+| `anon/candidates/videos/` | 1527 | Candidate MP4 clips |
+| `anon/candidates/metadata/` | 75 | Candidate metadata JSONs (per source video) |
+| `anon/vlm/2026-06-26/vlm_annotations/` | 3059 | VLM annotations: events.csv (48 events), normalized/ (1527 JSONs), raw/, processing.csv, summary.json |
+| `anon/vlm/2026-06-26/task_7_vlm/` | 6 | Task 7: clips.csv, events.csv (41 events, post-review), processing.csv, dedup_audit.json, provenance.json, summary.json |
+| `anon/vlm/2026-06-26/task_7_review/` | 1 | review_manifest.csv |
+
+Canonical ground truth: `task_7_vlm/events.csv` (41 events, post-manual-review),
+not `vlm_annotations/events.csv` (48, pre-dedup).
 
 ## Known Limitations
 

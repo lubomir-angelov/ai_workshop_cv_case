@@ -219,9 +219,5 @@ yolo*
 # Annotation artifacts (generated per-session)
 annotation/tasks.json
 annotation/export.json
-annotation/label_studio_data/
 annotation/*.csv
 annotation/*.parquet
-
-# Documentation (generated)
-PIPELINE_OPTIMIZATION.md
