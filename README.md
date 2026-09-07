@@ -4,6 +4,31 @@ A repo to hold the work on the Summer School 2026 CV case.
 # Case details are separate at:
 https://github.com/Marchev-Science/case-pickup-putdown-event-detection
 
+## Project documentation
+
+- [Reproducibility](docs/REPRODUCIBILITY.md) — verified setup, commands,
+  outputs, metadata, and pending integration work.
+- [Data privacy](docs/DATA_PRIVACY.md) — access, publication, retention, and
+  incident-handling rules.
+- [Failure modes](docs/FAILURE_MODES.md) — known limitations and reporting
+  taxonomy.
+- [Task 17 checklist](docs/TASK_17_CHECKLIST.md) — completed documentation and
+  evidence pending later tasks.
+- [Annotation workflow](docs/ANNOTATION_WORKFLOW.md) — Label Studio procedure.
+- [Labeling guidelines](docs/LABELING_GUIDELINES.md) — canonical definitions
+  and edge-case rules.
+
+Current documentation covers Tasks 1–6 and the Task 8 evaluator. Later model
+training, final evaluation CLI, and batch inference remain pending.
+
+Reference case repository is read-only. Implementation code belongs in this
+solution repository; source data and generated artifacts belong in approved
+private storage.
+
+Source videos contain people. Do not identify individuals, redistribute source
+clips, or publish unblurred customer imagery. Keep credentials, raw media,
+previews, real annotations, features, and model weights outside Git.
+
 
 # Local ingestion and Task 3 smoke test
 
@@ -408,4 +433,3 @@ pickup-putdown candidates-upload --target-count 0
 ```
 
 Use `--target-count 0` to process/upload all ready candidates. Use `--keep-local-files` to retain intermediate work directories for debugging.
-

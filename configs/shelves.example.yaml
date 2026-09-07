@@ -1,0 +1,16 @@
+cameras:
+  example_camera:
+    source_width: 1920
+    source_height: 1080
+    expansion:
+      mode: pixel
+      value: 20.0
+    regions:
+      - region_id: example_shelf
+        type: shelf
+        polygon:
+          - [100, 100]
+          - [900, 100]
+          - [900, 700]
+          - [100, 700]
+
