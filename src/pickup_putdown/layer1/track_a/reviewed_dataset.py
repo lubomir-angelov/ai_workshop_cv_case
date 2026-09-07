@@ -908,6 +908,8 @@ def build_reviewed_feature_dataset(
     track_a_cfg: TrackAFeaturesConfig,
     shelf_regions: dict[str, Polygon],
     split_seed: int = 42,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
     embedder: AbstractImageEmbedder | None = None,
 ) -> tuple[FeatureDataset, BuildSummary]:
     """Build the reviewed Track A feature dataset.
@@ -930,7 +932,9 @@ def build_reviewed_feature_dataset(
         pose_cfg: Pose inference configuration.
         track_a_cfg: Track A features configuration.
         shelf_regions: Map of region_id -> polygon.
-        split_seed: Random seed for split assignment.
+        split_seed: Random seed for deterministic split assignment.
+        train_ratio: Fraction of recording days for the train split.
+        val_ratio: Fraction of recording days for the val split.
         embedder: Optional pre-created embedder.
 
     Returns:
@@ -994,7 +998,9 @@ def build_reviewed_feature_dataset(
     # Step 3: Assign splits
     logger.info("Assigning splits...")
     clip_ids = list({ex.clip_id for ex in examples})
-    splits = assign_splits_by_recording_day(clip_ids, seed=split_seed)
+    splits = assign_splits_by_recording_day(
+        clip_ids, seed=split_seed, train_ratio=train_ratio, val_ratio=val_ratio
+    )
     validate_split_isolation(splits, examples)
 
     split_counts = {}
