@@ -800,6 +800,9 @@ def generate_candidates(
             validate_candidate(candidate, clip_duration)
             candidates.append(candidate)
 
+    if proposals_cfg.event_merge_gap_s is not None:
+        candidates = _merge_candidate_events(candidates, clip_durations, proposals_cfg)
+
     candidates.sort(
         key=lambda candidate: (
             candidate.clip_id,
@@ -812,6 +815,207 @@ def generate_candidates(
         )
     )
     return candidates
+
+
+def _find_root(parent: list[int], index: int) -> int:
+    """Union-find root lookup with path compression."""
+    while parent[index] != index:
+        parent[index] = parent[parent[index]]
+        index = parent[index]
+    return index
+
+
+def _candidates_link(
+    first: Candidate,
+    second: Candidate,
+    gap_s: float,
+    cross_actor_gap_s: float,
+) -> bool:
+    """Decide whether two candidates of the same clip belong to one event.
+
+    ``first`` must not start after ``second``. Same-actor candidates link
+    across a quiet gap of up to ``gap_s``; different-actor candidates link
+    only when their raw intervals overlap or abut within
+    ``cross_actor_gap_s``, so fragmented tracks of one person merge while
+    two people acting seconds apart stay separate.
+    """
+    gap = second.raw_start_s - first.raw_end_s
+    if first.actor_id == second.actor_id:
+        return gap <= gap_s
+    return gap <= min(cross_actor_gap_s, gap_s)
+
+
+def _split_cluster_at_largest_gap(
+    members: list[Candidate],
+    maximum_span_s: float,
+) -> list[list[Candidate]]:
+    """Split a cluster whose raw union exceeds ``maximum_span_s``.
+
+    Splits recursively at the largest internal quiet gap, so boundaries land
+    where activity naturally paused. A cluster with no positive internal gap
+    cannot be split and is returned whole.
+    """
+    if len(members) < 2:
+        return [members]
+    span = max(c.raw_end_s for c in members) - min(c.raw_start_s for c in members)
+    if span <= maximum_span_s:
+        return [members]
+
+    largest_gap = 0.0
+    split_index = 0
+    running_end = members[0].raw_end_s
+    for index in range(1, len(members)):
+        gap = members[index].raw_start_s - running_end
+        if gap > largest_gap:
+            largest_gap = gap
+            split_index = index
+        running_end = max(running_end, members[index].raw_end_s)
+
+    if split_index == 0:
+        logger.warning(
+            "Merged event cluster in clip %s spans %.3fs (> %.3fs) with no "
+            "internal gap to split at; keeping one candidate.",
+            members[0].clip_id,
+            span,
+            maximum_span_s,
+        )
+        return [members]
+
+    return _split_cluster_at_largest_gap(
+        members[:split_index], maximum_span_s
+    ) + _split_cluster_at_largest_gap(members[split_index:], maximum_span_s)
+
+
+def _merge_cluster(
+    members: list[Candidate],
+    clip_duration: float,
+    proposals_cfg: ProposalsConfig,
+) -> Candidate:
+    """Collapse one event cluster into a single candidate.
+
+    The representative member (highest dwell, then score) donates actor,
+    hand, and region so downstream consumers that match pose observations
+    by exact hand side keep working. Dwell takes the maximum rather than
+    the sum because members typically describe the same physical motion.
+    """
+    representative = max(
+        members,
+        key=lambda c: (
+            c.total_dwell_duration_s,
+            c.proposal_score if c.proposal_score is not None else float("-inf"),
+            c.candidate_id,
+        ),
+    )
+    raw_start = max(0.0, min(c.raw_start_s for c in members))
+    raw_end = min(clip_duration, max(c.raw_end_s for c in members))
+
+    desired_start = max(0.0, raw_start - proposals_cfg.context_before_s)
+    desired_end = min(clip_duration, raw_end + proposals_cfg.context_after_s)
+    window_start, window_end = _bounded_context_window(
+        raw_start=raw_start,
+        raw_end=raw_end,
+        desired_start=desired_start,
+        desired_end=desired_end,
+        clip_duration=clip_duration,
+        maximum_duration=float(proposals_cfg.maximum_candidate_duration_s),
+    )
+
+    distances = [c.min_region_distance for c in members if c.min_region_distance is not None]
+    confidences = [c.max_wrist_confidence for c in members if c.max_wrist_confidence is not None]
+    scores = [c.proposal_score for c in members if c.proposal_score is not None]
+
+    raw_start_us = round(raw_start * 1_000_000)
+    raw_end_us = round(raw_end * 1_000_000)
+    identifier_payload = "\x1f".join(
+        [
+            representative.clip_id,
+            representative.actor_id,
+            representative.hand_side or "",
+            representative.region_id or "",
+            str(raw_start_us),
+            str(raw_end_us),
+        ]
+    )
+    candidate_id = "cand_" + hashlib.sha256(identifier_payload.encode("utf-8")).hexdigest()[:12]
+
+    merged = Candidate(
+        candidate_id=candidate_id,
+        clip_id=representative.clip_id,
+        actor_id=representative.actor_id,
+        hand_side=representative.hand_side,
+        region_id=representative.region_id,
+        raw_start_s=round(raw_start, 4),
+        raw_end_s=round(raw_end, 4),
+        window_start_s=round(window_start, 4),
+        window_end_s=round(window_end, 4),
+        n_raw_interactions=sum(c.n_raw_interactions for c in members),
+        min_region_distance=round(min(distances), 4) if distances else None,
+        max_wrist_confidence=round(max(confidences), 4) if confidences else None,
+        total_dwell_duration_s=round(max(c.total_dwell_duration_s for c in members), 4),
+        config_fingerprint=representative.config_fingerprint,
+        proposal_reason=f"merged_event({len(members)})",
+        proposal_score=max(scores) if scores else None,
+        review_status="pending",
+    )
+    validate_candidate(merged, clip_duration)
+    return merged
+
+
+def _merge_candidate_events(
+    candidates: list[Candidate],
+    clip_durations: dict[str, float],
+    proposals_cfg: ProposalsConfig,
+) -> list[Candidate]:
+    """Merge per-(actor, hand, region) candidates into per-event candidates.
+
+    Within each clip, candidates whose raw intervals chain together with
+    quiet gaps of at most ``event_merge_gap_s`` form one event cluster
+    (connected components over :func:`_candidates_link`). Clusters whose
+    raw union exceeds ``maximum_candidate_duration_s`` are split at their
+    largest internal gap so continuous browsing cannot daisy-chain into
+    one oversized clip.
+    """
+    gap_s = float(proposals_cfg.event_merge_gap_s or 0.0)
+    cross_actor_gap_s = float(proposals_cfg.cross_actor_merge_gap_s)
+    maximum_span_s = float(proposals_cfg.maximum_candidate_duration_s)
+
+    by_clip: dict[str, list[Candidate]] = defaultdict(list)
+    for candidate in candidates:
+        by_clip[candidate.clip_id].append(candidate)
+
+    merged_candidates: list[Candidate] = []
+    for clip_id, clip_candidates in by_clip.items():
+        clip_candidates.sort(key=lambda c: (c.raw_start_s, c.raw_end_s, c.candidate_id))
+
+        parent = list(range(len(clip_candidates)))
+
+        for i in range(len(clip_candidates)):
+            for j in range(i + 1, len(clip_candidates)):
+                if _candidates_link(
+                    clip_candidates[i], clip_candidates[j], gap_s, cross_actor_gap_s
+                ):
+                    parent[_find_root(parent, j)] = _find_root(parent, i)
+
+        clusters: dict[int, list[Candidate]] = defaultdict(list)
+        for index, candidate in enumerate(clip_candidates):
+            clusters[_find_root(parent, index)].append(candidate)
+
+        clip_duration = float(clip_durations[clip_id])
+        for members in clusters.values():
+            for group in _split_cluster_at_largest_gap(members, maximum_span_s):
+                if len(group) == 1:
+                    merged_candidates.append(group[0])
+                else:
+                    merged_candidates.append(_merge_cluster(group, clip_duration, proposals_cfg))
+
+    n_merged = len(candidates) - len(merged_candidates)
+    if n_merged > 0:
+        logger.info(
+            "Event merge collapsed %d candidate(s) into %d event candidate(s).",
+            len(candidates),
+            len(merged_candidates),
+        )
+    return merged_candidates
 
 
 def _bounded_context_window(
@@ -883,6 +1087,14 @@ def _config_fingerprint(proposals_cfg: ProposalsConfig) -> str:
             proposals_cfg.maximum_candidate_duration_s,
         ),
     )
+    if proposals_cfg.event_merge_gap_s is not None:
+        # Appended conditionally so fingerprints of runs that never used
+        # event merging remain comparable with historical outputs.
+        values = (
+            *values,
+            ("event_merge_gap_s", proposals_cfg.event_merge_gap_s),
+            ("cross_actor_merge_gap_s", proposals_cfg.cross_actor_merge_gap_s),
+        )
     payload = ";".join(f"{key}={value}" for key, value in values)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
 
