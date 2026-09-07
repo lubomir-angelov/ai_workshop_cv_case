@@ -1544,7 +1544,15 @@ def _generate_video_url(
         # Use s3://bucket/key format for Label Studio cloud-storage integration
         if raw_video.startswith("s3://"):
             return raw_video
-        return f"s3://{s3_bucket}/{raw_video}"
+        key = raw_video.lstrip("/")
+        prefix = (s3_prefix or "").strip("/")
+        if prefix and not key.startswith(f"{prefix}/"):
+            # Candidate metadata may carry a staging/local path
+            # (e.g. .local/candidate_staging/candidates/<source_id>/<cand>.mp4).
+            # Rebuild the key as <prefix>/<source_id>/<candidate_id>.mp4.
+            parts = Path(key).parts
+            key = "/".join((prefix, *parts[-2:])) if len(parts) >= 2 else f"{prefix}/{key}"
+        return f"s3://{s3_bucket}/{key}"
 
     if mode == VideoUrlMode.PRESIGNED:
         # Presigned URLs must be generated externally at task-build time.
