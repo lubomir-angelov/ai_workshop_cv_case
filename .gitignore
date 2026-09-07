@@ -214,6 +214,7 @@ artifacts/
 **.backup
 .local/
 models/
+yolo*
 
 # Annotation artifacts (generated per-session)
 annotation/tasks.json
