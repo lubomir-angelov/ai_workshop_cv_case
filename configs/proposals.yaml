@@ -79,6 +79,14 @@ proposals:
   context_after_s: 2.0
   # Maximum candidate duration (seconds). Longer candidates are trimmed.
   maximum_candidate_duration_s: 10.0
+  # Maximum gap (seconds) with no raw interaction before candidates of the
+  # same clip count as separate events. Candidates closer than this merge
+  # across hand and region (and across actors when their raw intervals
+  # overlap in time) into one candidate per event. null disables merging.
+  event_merge_gap_s: 1.0
+  # Gap tolerance (seconds) for event-merging candidates with different
+  # actor ids (fragmented tracks that abut without overlapping).
+  cross_actor_merge_gap_s: 0.25
   # Optional trajectory smoothing applied before region measurements.
   trajectory_smoothing: false
   # Smoothing window size (odd integer) for moving-average smoothing.

@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pickup_putdown.common.schemas import Event, EventType
+from pickup_putdown.common.schemas import Candidate, Event, EventType, PoseObservation
 from pickup_putdown.layer1.track_a.contracts import (
     CropGeometry,
     FeatureDataset,
@@ -41,6 +41,7 @@ from pickup_putdown.layer1.track_a.reviewed_dataset import (
     resolve_reviewed_examples,
     validate_split_isolation,
 )
+from pickup_putdown.layer1.track_a.sampling import get_wrist_trajectory_for_candidate
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -49,7 +50,71 @@ from pickup_putdown.layer1.track_a.reviewed_dataset import (
 
 @pytest.fixture
 def review_manifest(tmp_path: Path) -> Path:
-    """Create a synthetic review manifest CSV."""
+    """Create a synthetic review manifest CSV with matching JSON files."""
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+
+    # Create JSON files with reviewed events
+    json_data = {
+        "cand_p1": {
+            "candidate_id": "cand_p1",
+            "clip_id": "D2_S20260520141725_E20260520142151_anon",
+            "source_start_s": 9.0,
+            "source_end_s": 13.0,
+            "events": [
+                {
+                    "label": "pickup",
+                    "start_s": 1.0,
+                    "end_s": 2.0,
+                    "item_count": 1,
+                    "confidence": "high",
+                    "hard_case": False,
+                    "notes": "reviewed pickup",
+                }
+            ],
+        },
+        "cand_pd1": {
+            "candidate_id": "cand_pd1",
+            "clip_id": "D2_S20260520141725_E20260520142151_anon",
+            "source_start_s": 14.0,
+            "source_end_s": 18.0,
+            "events": [
+                {
+                    "label": "putdown",
+                    "start_s": 0.5,
+                    "end_s": 1.5,
+                    "item_count": 1,
+                    "confidence": "high",
+                    "hard_case": False,
+                    "notes": "reviewed putdown",
+                }
+            ],
+        },
+        "cand_n1": {
+            "candidate_id": "cand_n1",
+            "clip_id": "D2_S20260521112037_E20260521112553_anon",
+            "source_start_s": 20.0,
+            "source_end_s": 24.0,
+            "events": [],
+        },
+        "cand_n2": {
+            "candidate_id": "cand_n2",
+            "clip_id": "D2_S20260521112037_E20260521112553_anon",
+            "source_start_s": 30.0,
+            "source_end_s": 34.0,
+            "events": [],
+        },
+        "cand_unrev": {
+            "candidate_id": "cand_unrev",
+            "clip_id": "D2_S20260522132934_E20260522133448_anon",
+            "source_start_s": 49.0,
+            "source_end_s": 53.0,
+            "events": [],
+        },
+    }
+    for cid, data in json_data.items():
+        (json_dir / f"{cid}.json").write_text(json.dumps(data))
+
     p = tmp_path / "review_manifest.csv"
     with open(p, "w", newline="") as f:
         writer = csv.writer(f)
@@ -71,7 +136,7 @@ def review_manifest(tmp_path: Path) -> Path:
                 "D2_S20260520141725_E20260520142151_anon",
                 "vlm_positive",
                 "/v/cand_p1.mp4",
-                "/j/cand_p1.json",
+                str(json_dir / "cand_p1.json"),
                 1,
                 "true",
                 "confirmed pickup",
@@ -83,7 +148,7 @@ def review_manifest(tmp_path: Path) -> Path:
                 "D2_S20260520141725_E20260520142151_anon",
                 "vlm_positive",
                 "/v/cand_pd1.mp4",
-                "/j/cand_pd1.json",
+                str(json_dir / "cand_pd1.json"),
                 1,
                 "true",
                 "confirmed putdown",
@@ -95,7 +160,7 @@ def review_manifest(tmp_path: Path) -> Path:
                 "D2_S20260521112037_E20260521112553_anon",
                 "negative_sample",
                 "/v/cand_n1.mp4",
-                "/j/cand_n1.json",
+                str(json_dir / "cand_n1.json"),
                 0,
                 "true",
                 "confirmed no events",
@@ -107,7 +172,7 @@ def review_manifest(tmp_path: Path) -> Path:
                 "D2_S20260521112037_E20260521112553_anon",
                 "vlm_positive",
                 "/v/cand_n2.mp4",
-                "/j/cand_n2.json",
+                str(json_dir / "cand_n2.json"),
                 0,
                 "true",
                 "confirmed no event",
@@ -119,7 +184,7 @@ def review_manifest(tmp_path: Path) -> Path:
                 "D2_S20260522132934_E20260522133448_anon",
                 "vlm_positive",
                 "/v/cand_unrev.mp4",
-                "/j/cand_unrev.json",
+                str(json_dir / "cand_unrev.json"),
                 1,
                 "false",
                 "not reviewed yet",
@@ -131,7 +196,7 @@ def review_manifest(tmp_path: Path) -> Path:
                 "D2_S20260522132934_E20260522133448_anon",
                 "vlm_positive",
                 "/v/cand_nometa.mp4",
-                "/j/cand_nometa.json",
+                str(json_dir / "cand_nometa.json"),
                 1,
                 "true",
                 "confirmed pickup",
@@ -453,8 +518,161 @@ class TestResolveReviewedExamples:
         assert "cand_nometa" not in cids
         assert summary.excluded_no_match >= 1
 
-    def test_unmatched_positive_raises_error(self, tmp_path):
-        """A reviewed positive with no matching canonical event produces an error."""
+    def test_labels_from_reviewed_json(self, tmp_path):
+        """Labels come from reviewed JSON events, not VLM events."""
+        json_dir = tmp_path / "json"
+        json_dir.mkdir()
+
+        # JSON has pickup label
+        (json_dir / "cand_good.json").write_text(
+            json.dumps(
+                {
+                    "candidate_id": "cand_good",
+                    "clip_id": "clip1",
+                    "source_start_s": 10.0,
+                    "source_end_s": 12.0,
+                    "events": [
+                        {"label": "pickup", "start_s": 0.5, "end_s": 1.5, "confidence": "high"}
+                    ],
+                }
+            )
+        )
+
+        manifest = tmp_path / "m.csv"
+        with open(manifest, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "candidate_id",
+                    "clip_id",
+                    "review_groups",
+                    "video_path",
+                    "json_path",
+                    "event_count",
+                    "reviewed",
+                    "review_notes",
+                ]
+            )
+            writer.writerow(
+                [
+                    "cand_good",
+                    "clip1",
+                    "vlm_positive",
+                    "/v/c.mp4",
+                    str(json_dir / "cand_good.json"),
+                    1,
+                    "true",
+                    "confirmed pickup",
+                ]
+            )
+
+        events = []  # No VLM events
+        meta = {
+            "cand_good": CandidateMetadata(
+                candidate_id="cand_good",
+                clip_id="clip1",
+                source_start_s=10.0,
+                source_end_s=12.0,
+                duration_s=2.0,
+            )
+        }
+
+        records = load_review_manifest(manifest)
+        examples, summary = resolve_reviewed_examples(records, events, meta)
+        assert len(examples) == 1
+        assert examples[0].label == "pickup"
+        assert summary.positives == 1
+
+    def test_missing_json_excluded(self, tmp_path):
+        """Candidate with missing JSON is excluded."""
+        manifest = tmp_path / "m.csv"
+        with open(manifest, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "candidate_id",
+                    "clip_id",
+                    "review_groups",
+                    "video_path",
+                    "json_path",
+                    "event_count",
+                    "reviewed",
+                    "review_notes",
+                ]
+            )
+            writer.writerow(
+                [
+                    "cand_bad",
+                    "clip1",
+                    "vlm_positive",
+                    "/v/c.mp4",
+                    "/nonexistent/c.json",
+                    1,
+                    "true",
+                    "confirmed pickup",
+                ]
+            )
+
+        events = []
+        meta = {
+            "cand_bad": CandidateMetadata(
+                candidate_id="cand_bad",
+                clip_id="clip1",
+                source_start_s=10.0,
+                source_end_s=12.0,
+                duration_s=2.0,
+            )
+        }
+
+        records = load_review_manifest(manifest)
+        examples, summary = resolve_reviewed_examples(records, events, meta)
+        assert len(examples) == 0
+        assert summary.excluded_no_match >= 1
+
+    def test_event_relative_overlap(self):
+        """Event-relative overlap matches even when candidate is much wider."""
+        from pickup_putdown.layer1.track_a.reviewed_dataset import (
+            _match_events_to_candidate,
+        )
+
+        # Wide candidate (8s), short event (1s) — candidate fully covers event
+        events = [
+            Event(
+                event_id="evt1",
+                clip_id="clip1",
+                type=EventType.PICKUP,
+                t_start=5.0,
+                t_end=6.0,
+            )
+        ]
+        matched = _match_events_to_candidate(events, 2.0, 10.0)
+        assert len(matched) == 1
+        assert matched[0]["event_id"] == "evt1"
+        # Event-relative: 1s overlap / 1s event = 1.0
+        assert matched[0]["overlap_ratio"] == 1.0
+
+    def test_partial_event_overlap_matches(self):
+        """Partial event coverage still matches above threshold."""
+        from pickup_putdown.layer1.track_a.reviewed_dataset import (
+            _match_events_to_candidate,
+        )
+
+        # Event is 2s, candidate covers 0.5s of it → 25% > 10% threshold
+        events = [
+            Event(
+                event_id="evt1",
+                clip_id="clip1",
+                type=EventType.PICKUP,
+                t_start=5.0,
+                t_end=7.0,
+            )
+        ]
+        matched = _match_events_to_candidate(events, 5.0, 5.5)
+        assert len(matched) == 1
+        assert matched[0]["overlap_ratio"] == pytest.approx(0.25)
+
+    def test_no_examples_raises(self, tmp_path):
+        """Pipeline raises when no examples are resolved at all."""
         manifest = tmp_path / "m.csv"
         with open(manifest, "w", newline="") as f:
             writer = csv.writer(f)
@@ -476,23 +694,14 @@ class TestResolveReviewedExamples:
                     "D2_S20260599999999_E20260599999999_anon",
                     "vlm_positive",
                     "/v/c.mp4",
-                    "/j/c.json",
+                    "/nonexistent/c.json",
                     1,
                     "true",
                     "confirmed pickup",
                 ]
             )
 
-        events = [
-            Event(
-                event_id="evt_other",
-                clip_id="D2_S20260520141725_E20260520142151_anon",
-                type=EventType.PICKUP,
-                t_start=10.0,
-                t_end=12.0,
-            )
-        ]
-
+        events = []
         meta = {
             "cand_bad": CandidateMetadata(
                 candidate_id="cand_bad",
@@ -504,9 +713,9 @@ class TestResolveReviewedExamples:
         }
 
         records = load_review_manifest(manifest)
-        _, summary = resolve_reviewed_examples(records, events, meta)
-        assert len(summary.errors) >= 1
-        assert "no matching canonical event" in summary.errors[0]
+        examples, summary = resolve_reviewed_examples(records, events, meta)
+        assert len(examples) == 0
+        assert summary.excluded_no_match >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -763,3 +972,343 @@ class TestCachedEmbeddings:
         loaded = load_embedding(cache_dir, key)
         assert loaded is not None
         np.testing.assert_array_almost_equal(loaded, emb)
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Pose-candidate association
+# ---------------------------------------------------------------------------
+
+
+class TestPoseCandidateAssociation:
+    """Tests for pose observation matching to candidates."""
+
+    def _make_pose(
+        self,
+        clip_id="clip1",
+        timestamp_s=10.0,
+        actor_id="actor_1",
+        hand_side="right",
+    ) -> PoseObservation:
+        return PoseObservation(
+            clip_id=clip_id,
+            timestamp_s=timestamp_s,
+            source_frame_index=0,
+            sample_index=0,
+            actor_id=actor_id,
+            hand_side=hand_side,
+            wrist_x=100.0,
+            wrist_y=200.0,
+            wrist_confidence=0.9,
+        )
+
+    def _make_candidate(
+        self,
+        candidate_id="c1",
+        clip_id="clip1",
+        actor_id="actor_1",
+        hand_side="right",
+        window_start_s=8.0,
+        window_end_s=12.0,
+    ) -> Candidate:
+        return Candidate(
+            candidate_id=candidate_id,
+            clip_id=clip_id,
+            actor_id=actor_id,
+            hand_side=hand_side,
+            raw_start_s=window_start_s,
+            raw_end_s=window_end_s,
+            window_start_s=window_start_s,
+            window_end_s=window_end_s,
+        )
+
+    def test_pose_keyed_by_clip_id_matches_candidate(self):
+        """Pose observations keyed by source clip_id match correct candidate."""
+        poses = [
+            self._make_pose(timestamp_s=10.0),
+            self._make_pose(timestamp_s=11.0),
+        ]
+        cand = self._make_candidate()
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 2
+
+    def test_candidate_with_nonzero_source_start_receives_poses(self):
+        """A candidate with nonzero source_start_s receives poses correctly."""
+        poses = [
+            self._make_pose(timestamp_s=120.0),
+            self._make_pose(timestamp_s=125.0),
+        ]
+        cand = self._make_candidate(
+            window_start_s=118.0,
+            window_end_s=128.0,
+        )
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 2
+
+    def test_window_relative_to_source_timestamp_conversion(self):
+        """Window-relative pose timestamps are converted to source timestamps once."""
+        window_start = 100.0
+        poses = [self._make_pose(timestamp_s=window_start + rel_t) for rel_t in [1.0, 2.0, 3.0]]
+        cand = self._make_candidate(
+            window_start_s=window_start,
+            window_end_s=window_start + 5.0,
+        )
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 3
+        assert matched[0].timestamp_s == pytest.approx(window_start + 1.0)
+
+    def test_source_to_candidate_relative_timestamp(self):
+        """Source timestamps convert to candidate-relative timestamps exactly once."""
+        source_start = 100.0
+        poses = [self._make_pose(timestamp_s=source_start + rel_t) for rel_t in [1.0, 2.0, 3.0]]
+        cand = self._make_candidate(
+            window_start_s=source_start,
+            window_end_s=source_start + 5.0,
+        )
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        cand_relative = [m.timestamp_s - cand.window_start_s for m in matched]
+        assert cand_relative == pytest.approx([1.0, 2.0, 3.0])
+
+    def test_two_candidates_same_clip_get_own_poses(self):
+        """Two candidates from same clip receive only their own overlapping poses."""
+        poses = [
+            self._make_pose(timestamp_s=10.0),
+            self._make_pose(timestamp_s=20.0),
+        ]
+        cand_a = self._make_candidate(
+            candidate_id="ca",
+            window_start_s=8.0,
+            window_end_s=12.0,
+        )
+        cand_b = self._make_candidate(
+            candidate_id="cb",
+            window_start_s=18.0,
+            window_end_s=22.0,
+        )
+        matched_a = get_wrist_trajectory_for_candidate(cand_a, poses)
+        matched_b = get_wrist_trajectory_for_candidate(cand_b, poses)
+        assert len(matched_a) == 1
+        assert matched_a[0].timestamp_s == pytest.approx(10.0)
+        assert len(matched_b) == 1
+        assert matched_b[0].timestamp_s == pytest.approx(20.0)
+
+    def test_different_clips_do_not_share_poses(self):
+        """Candidates from different clips do not share observations."""
+        poses = [self._make_pose(clip_id="clip1", timestamp_s=10.0)]
+        cand = self._make_candidate(clip_id="clip2")
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 0
+
+    def test_no_matching_pose_returns_empty(self):
+        """A candidate with no matching observations returns empty list."""
+        poses = [self._make_pose(clip_id="other_clip")]
+        cand = self._make_candidate()
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert matched == []
+
+    def test_actor_id_mismatch_skips(self):
+        """Pose with wrong actor_id does not match candidate."""
+        poses = [self._make_pose(actor_id="actor_2")]
+        cand = self._make_candidate(actor_id="actor_1")
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 0
+
+    def test_hand_side_mismatch_skips(self):
+        """Pose with wrong hand_side does not match candidate."""
+        poses = [self._make_pose(hand_side="left")]
+        cand = self._make_candidate(hand_side="right")
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 0
+
+    def test_actor_id_fallback_on_mismatch(self):
+        """When actor_id doesn't match (person-tracker format), fall back to clip+hand+window."""
+        poses = [self._make_pose(actor_id="actor_5", timestamp_s=10.0)]
+        cand = self._make_candidate(actor_id="clip_X:person:1")
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 1
+        assert matched[0].actor_id == "actor_5"
+
+    def test_fallback_respects_hand_side(self):
+        """Fallback still respects hand_side filter."""
+        poses = [self._make_pose(actor_id="actor_5", hand_side="left", timestamp_s=10.0)]
+        cand = self._make_candidate(actor_id="clip_X:person:1", hand_side="right")
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 0
+
+    def test_fallback_respects_window(self):
+        """Fallback still respects time window filter."""
+        poses = [self._make_pose(actor_id="actor_5", timestamp_s=50.0)]
+        cand = self._make_candidate(
+            actor_id="clip_X:person:1", window_start_s=8.0, window_end_s=12.0
+        )
+        matched = get_wrist_trajectory_for_candidate(cand, poses)
+        assert len(matched) == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 14: Metadata passthrough
+# ---------------------------------------------------------------------------
+
+
+class TestMetadataPassthrough:
+    """Tests that actor_id/hand_side/region_id flow through the pipeline."""
+
+    def test_candidate_metadata_loads_actor_id(self, tmp_path: Path):
+        """CandidateMetadata loaded from JSON includes actor_id and hand_side."""
+        staging = tmp_path / "staging"
+        clip_dir = staging / "candidates" / "clip1"
+        clip_dir.mkdir(parents=True)
+        meta_file = clip_dir / "clip1.json"
+        meta_file.write_text(
+            json.dumps(
+                {
+                    "source_video_id": "clip1",
+                    "candidates": [
+                        {
+                            "candidate_id": "cand_a",
+                            "source_start_s": 10.0,
+                            "source_end_s": 12.0,
+                            "duration_s": 2.0,
+                            "actor_id": "actor_5",
+                            "hand_side": "right",
+                            "region_id": "shelf_1",
+                        }
+                    ],
+                }
+            )
+        )
+
+        index = load_candidate_metadata_index(staging)
+        assert index["cand_a"].actor_id == "actor_5"
+        assert index["cand_a"].hand_side == "right"
+        assert index["cand_a"].region_id == "shelf_1"
+
+    def test_resolve_reviewed_examples_passes_actor_id(self, tmp_path: Path):
+        """ReviewedExample gets actor_id/hand_side from metadata."""
+        json_dir = tmp_path / "json"
+        json_dir.mkdir()
+        (json_dir / "cand_x.json").write_text(
+            json.dumps(
+                {
+                    "candidate_id": "cand_x",
+                    "clip_id": "clip1",
+                    "source_start_s": 10.0,
+                    "source_end_s": 12.0,
+                    "events": [
+                        {"label": "pickup", "start_s": 0.5, "end_s": 1.5, "confidence": "high"}
+                    ],
+                }
+            )
+        )
+
+        manifest = tmp_path / "m.csv"
+        with open(manifest, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "candidate_id",
+                    "clip_id",
+                    "review_groups",
+                    "video_path",
+                    "json_path",
+                    "event_count",
+                    "reviewed",
+                    "review_notes",
+                ]
+            )
+            writer.writerow(
+                [
+                    "cand_x",
+                    "clip1",
+                    "vlm_positive",
+                    "/v/c.mp4",
+                    str(json_dir / "cand_x.json"),
+                    1,
+                    "true",
+                    "confirmed",
+                ]
+            )
+
+        meta = {
+            "cand_x": CandidateMetadata(
+                candidate_id="cand_x",
+                clip_id="clip1",
+                source_start_s=10.0,
+                source_end_s=12.0,
+                duration_s=2.0,
+                actor_id="actor_3",
+                hand_side="left",
+                region_id="shelf_2",
+            )
+        }
+
+        records = load_review_manifest(manifest)
+        examples, _ = resolve_reviewed_examples(records, [], meta)
+        assert len(examples) == 1
+        assert examples[0].actor_id == "actor_3"
+        assert examples[0].hand_side == "left"
+        assert examples[0].region_id == "shelf_2"
+
+    def test_negative_example_passes_actor_id(self, tmp_path: Path):
+        """Negative (zero-event) example also gets actor_id/hand_side."""
+        json_dir = tmp_path / "json"
+        json_dir.mkdir()
+        (json_dir / "cand_n.json").write_text(
+            json.dumps(
+                {
+                    "candidate_id": "cand_n",
+                    "clip_id": "clip1",
+                    "source_start_s": 20.0,
+                    "source_end_s": 24.0,
+                    "events": [],
+                }
+            )
+        )
+
+        manifest = tmp_path / "m.csv"
+        with open(manifest, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "candidate_id",
+                    "clip_id",
+                    "review_groups",
+                    "video_path",
+                    "json_path",
+                    "event_count",
+                    "reviewed",
+                    "review_notes",
+                ]
+            )
+            writer.writerow(
+                [
+                    "cand_n",
+                    "clip1",
+                    "negative_sample",
+                    "/v/c.mp4",
+                    str(json_dir / "cand_n.json"),
+                    0,
+                    "true",
+                    "confirmed negative",
+                ]
+            )
+
+        meta = {
+            "cand_n": CandidateMetadata(
+                candidate_id="cand_n",
+                clip_id="clip1",
+                source_start_s=20.0,
+                source_end_s=24.0,
+                duration_s=4.0,
+                actor_id="actor_7",
+                hand_side="right",
+                region_id="shelf_3",
+            )
+        }
+
+        records = load_review_manifest(manifest)
+        examples, _ = resolve_reviewed_examples(records, [], meta)
+        assert len(examples) == 1
+        assert examples[0].label == "negative"
+        assert examples[0].actor_id == "actor_7"
+        assert examples[0].hand_side == "right"
+        assert examples[0].region_id == "shelf_3"

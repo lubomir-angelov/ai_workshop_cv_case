@@ -128,12 +128,32 @@ class PersonTracker:
 
         clip_id = self._extract_clip_id()
 
+        # Sequential decoding is substantially faster than seeking with
+        # CAP_PROP_POS_FRAMES for every sampled frame: a positional seek
+        # re-decodes from the previous keyframe each time, and the source
+        # videos use GOPs spanning hundreds of frames. grab() advances the
+        # decoder without materializing frames we do not sample.
+        decoder_position = 0
+        stream_ended = False
         for si, src_frame_idx in enumerate(self._sample_frames):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, src_frame_idx)
+            while decoder_position < src_frame_idx:
+                if not cap.grab():
+                    logger.warning(
+                        "Video ended while advancing to frame %d of %s",
+                        src_frame_idx,
+                        self.video_path,
+                    )
+                    stream_ended = True
+                    break
+                decoder_position += 1
+            if stream_ended:
+                break
+
             ret, frame = cap.read()
+            decoder_position += 1
             if not ret:
                 logger.warning("Failed to read frame %d of %s", src_frame_idx, self.video_path)
-                continue
+                break
 
             timestamp_s = src_frame_idx / self._source_fps
 

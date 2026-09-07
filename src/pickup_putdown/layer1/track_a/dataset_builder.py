@@ -289,8 +289,8 @@ def _process_crop(
     # Create a placeholder geometry for cache key
     # (actual geometry determined after extraction)
     placeholder_geom = CropGeometry(
-        x=int(wrist_x) - crop_size // 2,
-        y=int(wrist_y) - crop_size // 2,
+        x=max(0, int(wrist_x) - crop_size // 2),
+        y=max(0, int(wrist_y) - crop_size // 2),
         width=crop_size,
         height=crop_size,
     )
@@ -466,6 +466,7 @@ def build_feature_dataset(
     skipped_no_video = 0
     skipped_no_split = 0
     skipped_no_region = 0
+    skipped_no_pose = 0
 
     for i, candidate in enumerate(candidates):
         # Skip if overlaps ignore interval
@@ -522,6 +523,9 @@ def build_feature_dataset(
             label_override=label_overrides.get(candidate.candidate_id),
         )
 
+        if not records:
+            skipped_no_pose += 1
+
         all_records.extend(records)
 
         # Progress logging
@@ -547,7 +551,8 @@ def build_feature_dataset(
     logger.info(f"  Splits: {dataset.n_train} train, {dataset.n_val} val, {dataset.n_test} test")
     logger.info(
         f"  Skipped: {skipped_ignore} ignore, {skipped_no_video} no_video, "
-        f"{skipped_no_split} no_split, {skipped_no_region} no_region"
+        f"{skipped_no_split} no_split, {skipped_no_region} no_region, "
+        f"{skipped_no_pose} no_pose"
     )
 
     return dataset
