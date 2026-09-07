@@ -337,6 +337,14 @@ def triage(
         "-o",
         help="Base directory for output files.",
     ),
+    render_previews: bool = typer.Option(
+        False,
+        "--render-previews/--no-render-previews",
+        help=(
+            "Render QA preview videos with track overlays. Previews are for "
+            "human review only; no downstream task consumes them."
+        ),
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -468,7 +476,7 @@ def triage(
 
         # Preview rendering (optional, for QA)
         preview_path = None
-        if spans or triage_cfg.preview_sample_rate > 0:
+        if render_previews and (spans or triage_cfg.preview_sample_rate > 0):
             from pickup_putdown.perception.previews import OverlayConfig, render_triage_preview
 
             preview_dir = output_base / "triage_previews"

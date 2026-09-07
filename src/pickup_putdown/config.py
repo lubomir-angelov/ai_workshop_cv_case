@@ -101,6 +101,13 @@ class ProposalsConfig(BaseModel):
     trajectory_smoothing: bool = False
     smoothing_window: int = 3
 
+    event_merge_gap_s: float | None = None
+
+    # Gap tolerance (seconds) for event-merging candidates with different
+    # actor ids, covering fragmented tracks whose raw intervals abut without
+    # overlapping. Effective only when event_merge_gap_s is set; capped by it.
+    cross_actor_merge_gap_s: float = 0.25
+
 
 class TrackAFeaturesConfig(BaseModel):
     """Configuration for Track A feature extraction (Task 9)."""

@@ -59,6 +59,9 @@ proposals:
   context_before_s: 2.0
   context_after_s: 2.0
   maximum_candidate_duration_s: 10.0
+  # Cross-group event merge (see configs/proposals.yaml for semantics).
+  event_merge_gap_s: 1.0
+  cross_actor_merge_gap_s: 0.25
   trajectory_smoothing: false
   smoothing_window: 3
 

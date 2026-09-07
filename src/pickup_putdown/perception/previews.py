@@ -492,9 +492,32 @@ def render_triage_preview(
 
         rendered_frames = 0
 
+        # Preview frame indices are sorted ascending, so decode sequentially:
+        # seek once to the first index, then grab() (decode-only) past
+        # unsampled frames and read() the sampled ones. A CAP_PROP_POS_FRAMES
+        # seek per frame re-decodes from the previous keyframe every time,
+        # and the source videos use GOPs spanning hundreds of frames.
+        decoder_position = preview_frame_indices[0]
+        if decoder_position > 0:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, decoder_position)
+
+        stream_ended = False
         for frame_index in preview_frame_indices:
-            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            while decoder_position < frame_index:
+                if not capture.grab():
+                    logger.warning(
+                        "Video ended while advancing to preview frame %d of %s",
+                        frame_index,
+                        video_path,
+                    )
+                    stream_ended = True
+                    break
+                decoder_position += 1
+            if stream_ended:
+                break
+
             success, frame = capture.read()
+            decoder_position += 1
 
             if not success:
                 logger.warning(
@@ -502,7 +525,7 @@ def render_triage_preview(
                     frame_index,
                     video_path,
                 )
-                continue
+                break
 
             if frame.shape[1] != output_width or frame.shape[0] != output_height:
                 frame = cv2.resize(
