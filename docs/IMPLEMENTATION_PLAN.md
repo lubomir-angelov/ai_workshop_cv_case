@@ -798,12 +798,10 @@ No Stage B row is written to `predictions.csv`.
 
 Use one tool consistently:
 
-- CVAT;
-- Label Studio;
-- VIA;
-- ELAN.
+- CVAT (online); annotators label the full source video.
 
-A custom Streamlit tool is acceptable only when importing Stage B proposals into an existing tool is harder than implementing the required timeline workflow.
+See `docs/CVAT_ANNOTATION_SETUP.md` for project setup and
+`docs/LABELING_GUIDELINES.md` for labeling rules.
 
 The selected tool must support:
 
@@ -2151,7 +2149,7 @@ Pandas or Polars
 PyArrow / Parquet
 Pydantic
 Typer
-CVAT, Label Studio, VIA, or ELAN
+CVAT
 MLflow or structured local run directories
 Docker Compose
 ```

@@ -45,7 +45,7 @@ task_13_optional ───────────── task_18_optional
 | `task_3` | `medium` | [Layer 0A Person Triage and Active-Span Extraction](task_3_stage_a_person_triage_medium.md) | Direct video-file person tracking | Tasks 1 and 2. |
 | `task_4` | `easy` | [Shelf and Surface Region Configuration](task_4_shelf_region_configuration_easy.md) | `configs/shelves.yaml` | Task 1 only. A representative frame from the camera is required. |
 | `task_5` | `hard` | [Layer 0B Pose Tracking and Actor-Specific Interaction Proposals](task_5_stage_b_interaction_proposals_hard.md) | Higher-rate pose inference over active spans | Tasks 3 and 4. |
-| `task_6` | `medium` | [Annotation Workflow and Canonical Import/Export](task_6_annotation_workflow_medium.md) | Configured annotation tool or purpose-built minimal UI | Task 1. Task 5 improves candidate-assisted annotation but is not required to start. |
+~~| `task_6` | `medium` | [CVAT Annotation Workflow](../CVAT_ANNOTATION_SETUP.md) | Annotation in CVAT online (source video) + export conversion via `scripts/convert_cvat_source_export.py` | Task 1. Done — annotation runs in CVAT online (source video). |~~
 | `task_7` | `medium` | [Dataset Validation, Agreement, Splits, and Versioning](task_7_dataset_quality_splits_medium.md) | Manifest validator | Tasks 2, 3, and 6. Task 5 is required to report proposal recall. |
 | `task_8` | `hard` | [Shared Two-Pass Temporal Evaluator and Reports](task_8_shared_evaluator_hard.md) | Class-aware one-to-one matcher | Task 1 schemas. Synthetic fixtures are sufficient to begin; Task 7 provides real data. |
 | `task_9` | `medium` | [Track A Crop Extraction and Appearance Features](task_9_track_a_features_medium.md) | Pre/contact/post timestamp selection | Tasks 5 and 7. |
