@@ -2319,6 +2319,16 @@ def build_track_a_dataset(
         "--split-seed",
         help="Random seed for deterministic split assignment.",
     ),
+    train_ratio: float = typer.Option(
+        0.7,
+        "--train-ratio",
+        help="Fraction of recording days for the train split.",
+    ),
+    val_ratio: float = typer.Option(
+        0.15,
+        "--val-ratio",
+        help="Fraction of recording days for the val split.",
+    ),
     config: str = typer.Option(
         "configs/proposals.yaml",
         "--config",
@@ -2378,6 +2388,7 @@ def build_track_a_dataset(
     typer.echo(f"  Source videos:     {source_video_dir}")
     typer.echo(f"  Output dir:        {output_dir}")
     typer.echo(f"  Split seed:        {split_seed}")
+    typer.echo(f"  Split ratios:      train={train_ratio} val={val_ratio}")
     typer.echo(f"  Camera:            {camera_id}")
     typer.echo(f"  Shelf regions:     {len(shelf_regions)}")
     typer.echo("")
@@ -2394,6 +2405,8 @@ def build_track_a_dataset(
             track_a_cfg=cfg.track_a_features,
             shelf_regions=shelf_regions,
             split_seed=split_seed,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
         )
     except Exception as exc:
         typer.echo(f"Error building dataset: {exc}", err=True)

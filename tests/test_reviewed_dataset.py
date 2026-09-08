@@ -32,6 +32,7 @@ from pickup_putdown.layer1.track_a.reviewed_dataset import (
     CandidateMetadata,
     ReviewedExample,
     _is_zero_event,
+    _normalize_pose_clip_id,
     assign_splits_by_recording_day,
     extract_recording_day,
     load_candidate_metadata_index,
@@ -1142,6 +1143,44 @@ class TestPoseCandidateAssociation:
         )
         matched = get_wrist_trajectory_for_candidate(cand, poses)
         assert len(matched) == 0
+
+
+class TestNormalizePoseClipId:
+    """PoseTracker emits ``clip_<stem>``; the build path matches on bare stems."""
+
+    def _pose(self, clip_id: str) -> PoseObservation:
+        return PoseObservation(
+            clip_id=clip_id,
+            timestamp_s=10.0,
+            source_frame_index=0,
+            sample_index=0,
+            actor_id="actor_1",
+            hand_side="right",
+            wrist_x=1.0,
+            wrist_y=2.0,
+            wrist_confidence=0.9,
+        )
+
+    def test_strips_clip_prefix(self):
+        assert _normalize_pose_clip_id(self._pose("clip_D2_X_anon")).clip_id == "D2_X_anon"
+
+    def test_bare_stem_unchanged(self):
+        assert _normalize_pose_clip_id(self._pose("D2_X_anon")).clip_id == "D2_X_anon"
+
+    def test_normalization_enables_candidate_match(self):
+        """After normalization, a bare-stem candidate finds its poses."""
+        poses = [_normalize_pose_clip_id(self._pose("clip_D2_X_anon"))]
+        cand = Candidate(
+            candidate_id="c1",
+            clip_id="D2_X_anon",
+            actor_id="actor_1",
+            hand_side="right",
+            raw_start_s=8.0,
+            raw_end_s=12.0,
+            window_start_s=8.0,
+            window_end_s=12.0,
+        )
+        assert len(get_wrist_trajectory_for_candidate(cand, poses)) == 1
 
 
 # ---------------------------------------------------------------------------

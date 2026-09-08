@@ -1361,9 +1361,25 @@ class TrackAInferencePipeline:
         all_raw_events: list[StateMachineEvent] = []
         diagnostics: list[CandidateDiagnostics] = []
 
+        # ponytail: log once per clip so long batch runs are monitorable
+        unique_clips = list(
+            dict.fromkeys(
+                getattr(c, "clip_id", "") for c in candidates if getattr(c, "clip_id", "")
+            )
+        )
+        current_clip: str | None = None
+
         for cand in candidates:
             cand_id = getattr(cand, "candidate_id", "unknown")
             clip_id = getattr(cand, "clip_id", "")
+            if clip_id and clip_id != current_clip:
+                current_clip = clip_id
+                logger.info(
+                    "Track A inference: clip %d/%d: %s",
+                    unique_clips.index(clip_id) + 1,
+                    len(unique_clips),
+                    clip_id,
+                )
             actor_id = getattr(cand, "actor_id", "")
             hand_side = getattr(cand, "hand_side", "") or ""
             region_id = getattr(cand, "region_id", "") or ""
