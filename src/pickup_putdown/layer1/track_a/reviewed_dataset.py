@@ -808,6 +808,18 @@ def validate_split_isolation(
 # ---------------------------------------------------------------------------
 
 
+def _normalize_pose_clip_id(obs: PoseObservation) -> PoseObservation:
+    """Strip the ``clip_`` prefix that PoseTracker adds to clip ids.
+
+    PoseTracker emits the parquet convention (``clip_<stem>``); the feature
+    pipeline matches poses to candidates by bare source-video stem, the same
+    convention the inference path uses when reading parquet files.
+    """
+    if not obs.clip_id.startswith("clip_"):
+        return obs
+    return obs.model_copy(update={"clip_id": obs.clip_id[5:]})
+
+
 def run_pose_inference_for_clips(
     clip_video_paths: dict[str, Path],
     time_windows: dict[str, list[tuple[float, float]]],
@@ -858,7 +870,7 @@ def run_pose_inference_for_clips(
                 active_spans=spans,
             )
             poses = tracker.run()
-            all_poses.extend(poses)
+            all_poses.extend(_normalize_pose_clip_id(p) for p in poses)
             logger.info(
                 "Pose inference for %s: %d observations from %d windows",
                 clip_id,

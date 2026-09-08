@@ -66,11 +66,19 @@ class EvaluationSummary:
 def load_splits(splits_path: Path) -> dict[str, dict[str, list[str]]]:
     """Load splits.json from feature dataset output.
 
+    Accepts the build's nested schema (``{"assignments": {clip: split}, ...}``)
+    or a flat ``{split: [clips]}`` mapping.
+
     Returns {"train": [...], "val": [...], "test": [...]}.
     """
     if not splits_path.is_file():
         raise FileNotFoundError(f"splits file not found: {splits_path}")
     data = json.loads(splits_path.read_text(encoding="utf-8"))
+    if isinstance(data.get("assignments"), dict):
+        grouped: dict[str, list[str]] = {}
+        for clip_id, split_name in data["assignments"].items():
+            grouped.setdefault(split_name, []).append(clip_id)
+        return {k: sorted(v) for k, v in grouped.items()}
     return {k: sorted(v) for k, v in data.items()}
 
 
@@ -595,6 +603,9 @@ def evaluate_track_a(
         clip_out = output_base / "inference" / cid
         video_path = Path(source_video_dir) / f"{cid}.mp4"
         candidate_clip_dir = Path(candidate_metadata) / cid
+        if not candidate_clip_dir.exists():
+            # Candidate loading supports both <dir>/<clip> and <dir>/candidates/<clip>
+            candidate_clip_dir = Path(candidate_metadata) / "candidates" / cid
 
         # Check per-clip data availability
         if not video_path.exists():

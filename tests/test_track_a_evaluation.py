@@ -148,6 +148,29 @@ def test_split_clip_resolution(tmp_dirs: dict) -> None:
     assert train_clips == ["clip_train_01", "clip_train_02"]
 
 
+def test_load_splits_build_nested_schema(tmp_path: Path) -> None:
+    """Builds write {"seed", "assignments": {clip: split}, "clip_counts"}; must load."""
+    p = tmp_path / "splits.json"
+    p.write_text(
+        json.dumps(
+            {
+                "seed": 42,
+                "assignments": {
+                    "clip_train_01": "train",
+                    "clip_train_02": "train",
+                    "clip_val_01": "val",
+                    "clip_test_01": "test",
+                },
+                "clip_counts": {"train": 2, "val": 1, "test": 1},
+            }
+        )
+    )
+    splits = load_splits(p)
+    assert splits["train"] == ["clip_train_01", "clip_train_02"]
+    assert splits["val"] == ["clip_val_01"]
+    assert splits["test"] == ["clip_test_01"]
+
+
 # ---------------------------------------------------------------------------
 # 2. Deterministic --limit-clips
 # ---------------------------------------------------------------------------
