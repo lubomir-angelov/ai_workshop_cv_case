@@ -340,6 +340,82 @@ def test_combine_predictions_empty(tmp_path: Path) -> None:
     assert combined == []
 
 
+def test_combine_predictions_shared_file_fallback(tmp_path: Path) -> None:
+    """Falls back to the single shared predictions.csv when per-clip files are absent."""
+    base = tmp_path / "inference"
+    base.mkdir()
+    (base / "predictions.csv").write_text(
+        "pred_id,clip_id,type,t_start,t_end,score,model\n"
+        "p1,clip_a,pickup,1.0,2.0,0.9,track_a\n"
+        "p2,clip_b,putdown,3.0,4.0,0.8,track_a\n"
+    )
+
+    combined = combine_predictions({"clip_a": base / "clip_a", "clip_b": base / "clip_b"})
+    assert len(combined) == 2
+    assert {r["clip_id"] for r in combined} == {"clip_a", "clip_b"}
+
+
+def test_combine_predictions_per_clip_wins_over_shared(tmp_path: Path) -> None:
+    """Per-clip files take precedence over the shared file (no double count)."""
+    base = tmp_path / "inference"
+    for cid in ["clip_a", "clip_b"]:
+        out = base / cid
+        out.mkdir(parents=True)
+        (out / "predictions.csv").write_text(
+            "pred_id,clip_id,type,t_start,t_end,score,model\n"
+            f"p1,{cid},pickup,1.0,2.0,0.9,track_a\n"
+        )
+    (base / "predictions.csv").write_text(
+        "pred_id,clip_id,type,t_start,t_end,score,model\np9,clip_a,putdown,9.0,10.0,0.5,track_a\n"
+    )
+
+    combined = combine_predictions({"clip_a": base / "clip_a", "clip_b": base / "clip_b"})
+    assert len(combined) == 2
+    assert all(r["pred_id"] == "p1" for r in combined)
+
+
+def test_predictions_filtered_to_evaluated_clips(tmp_dirs: dict) -> None:
+    """Off-split rows in the shared predictions file are excluded from metrics."""
+    from pickup_putdown.layer1.track_a.evaluation import evaluate_track_a
+
+    out = tmp_dirs["tmp_path"] / "eval_out"
+    (out / "inference").mkdir(parents=True)
+    (out / "inference" / "predictions.csv").write_text(
+        "pred_id,clip_id,type,t_start,t_end,score,model\n"
+        "p1,clip_val_01,pickup,1.0,2.0,0.9,track_a\n"
+        "p2,clip_val_01,putdown,3.0,4.0,0.8,track_a\n"
+        "p3,clip_train_01,pickup,1.0,2.0,0.9,track_a\n"
+        "p4,clip_test_01,pickup,5.0,6.0,0.9,track_a\n"
+    )
+
+    with mock.patch(
+        "pickup_putdown.layer1.track_a.evaluation.run_inference_for_clips"
+    ) as mock_infer:
+        mock_infer.return_value = {
+            "clip_val_01": "ok",
+            "clip_val_02": "ok",
+            "clip_val_03": "ok",
+        }
+        result = evaluate_track_a(
+            splits=tmp_dirs["splits"],
+            events=tmp_dirs["events"],
+            clips=tmp_dirs["clips"],
+            artifact_dir=tmp_dirs["artifact_dir"],
+            candidate_metadata=tmp_dirs["candidate_metadata"],
+            source_video_dir=tmp_dirs["source_video_dir"],
+            shelves_config=tmp_dirs["shelves_config"],
+            output_dir=out,
+        )
+
+    # Shared file holds 4 rows; only 2 belong to evaluated val clips
+    assert result.pred_event_count == 2
+    assert result.evaluated_clips == 3
+    # Metrics computed on filtered rows: p1/p2 match GT e1/e2 exactly
+    m = result.metrics["tiou@0.3"]
+    assert m["tp"] == 2
+    assert m["fp"] == 0
+
+
 # ---------------------------------------------------------------------------
 # 8. Task 8 evaluator invocation
 # ---------------------------------------------------------------------------

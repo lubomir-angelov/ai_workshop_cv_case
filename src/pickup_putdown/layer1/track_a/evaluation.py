@@ -198,13 +198,25 @@ def filter_ground_truth(
 def combine_predictions(
     clip_outputs: dict[str, Path],
 ) -> list[dict[str, Any]]:
-    """Combine predictions.csv from per-clip inference outputs."""
+    """Combine predictions.csv from per-clip inference outputs.
+
+    Falls back to the single shared ``inference/predictions.csv`` written when
+    ``infer-track-a`` runs once for all clips without ``--clip-id``.
+    """
     all_rows: list[dict[str, Any]] = []
+    found_per_clip = False
     for clip_id in sorted(clip_outputs):
         pred_path = clip_outputs[clip_id] / "predictions.csv"
         if pred_path.is_file():
-            rows = read_csv_rows(pred_path)
-            all_rows.extend(rows)
+            found_per_clip = True
+            all_rows.extend(read_csv_rows(pred_path))
+    if not found_per_clip and clip_outputs:
+        # ponytail: single-file fallback; the shared file sits next to the
+        # per-clip dirs, so derive its path from any clip output dir.
+        # Per-clip files win when present (no double count).
+        shared = next(iter(clip_outputs.values())).parent / "predictions.csv"
+        if shared.is_file():
+            all_rows.extend(read_csv_rows(shared))
     return all_rows
 
 
@@ -662,6 +674,10 @@ def evaluate_track_a(
     summary.evaluated_clips = len(evaluated_clip_ids)
 
     pred_rows = combine_predictions(clip_output_dirs)
+    # The shared predictions file can cover clips beyond the evaluated split
+    # (inference ran once for all clips); drop off-split rows or they would
+    # score as false positives against this split's ground truth.
+    pred_rows = [r for r in pred_rows if r.get("clip_id") in evaluated_clip_ids]
     summary.pred_event_count = len(pred_rows)
     summary.pickup_count = sum(1 for r in pred_rows if r.get("type") == "pickup")
     summary.putdown_count = sum(1 for r in pred_rows if r.get("type") == "putdown")
