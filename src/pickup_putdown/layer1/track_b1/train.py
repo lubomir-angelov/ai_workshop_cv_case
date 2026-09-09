@@ -91,6 +91,10 @@ class TrainConfig:
     # Device
     device: str = "auto"
 
+    # Learning rate for unfrozen encoder blocks. None means "same as the head", which
+    # is only sensible when the backbone is fully frozen.
+    backbone_lr: Optional[float] = None
+
 
 # ============================================================
 # METRICS TRACKING
@@ -236,7 +240,8 @@ def train_one_epoch(
         # Get sample weights if available
         sample_weights = batch.get("sample_weight")
         if sample_weights is not None:
-            sample_weights = sample_weights.to(device)
+            # Default collation of Python floats yields float64, which MPS rejects.
+            sample_weights = sample_weights.to(device=device, dtype=torch.float32)
 
         # Forward pass
         optimizer.zero_grad()
@@ -374,6 +379,61 @@ def validate(
 # ============================================================
 
 
+def _parameter_groups(model: nn.Module, config: TrainConfig) -> list[dict]:
+    """Split trainable parameters into head and unfrozen-backbone groups.
+
+    Returns a single group when no backbone rate is configured or nothing in the
+    encoder is trainable, so the frozen-backbone path is unchanged.
+    """
+    head_params, backbone_params = [], []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        (head_params if name.startswith("head.") else backbone_params).append(parameter)
+
+    if config.backbone_lr is None or not backbone_params:
+        return [{"params": head_params + backbone_params, "lr": config.learning_rate}]
+
+    logger.info(
+        "Discriminative learning rates: head %d tensors @ %g, backbone %d tensors @ %g",
+        len(head_params), config.learning_rate, len(backbone_params), config.backbone_lr,
+    )
+    return [
+        {"params": head_params, "lr": config.learning_rate},
+        {"params": backbone_params, "lr": config.backbone_lr},
+    ]
+
+
+def _stratified_indices(dataset, num_samples: int) -> list[int]:
+    """Pick ``num_samples`` dataset indices spread as evenly as possible over classes.
+
+    Falls back to the leading indices when the dataset exposes no manifest to read
+    labels from.
+    """
+    manifest = getattr(dataset, "manifest", None)
+    if manifest is None or "label" not in getattr(manifest, "columns", []):
+        return list(range(num_samples))
+
+    by_label: dict[int, list[int]] = {}
+    for position, label in enumerate(manifest["label"].tolist()):
+        by_label.setdefault(int(label), []).append(position)
+
+    picked: list[int] = []
+    labels = sorted(by_label)
+    round_index = 0
+    while len(picked) < num_samples:
+        added = False
+        for label in labels:
+            if round_index < len(by_label[label]) and len(picked) < num_samples:
+                picked.append(by_label[label][round_index])
+                added = True
+        if not added:
+            break
+        round_index += 1
+
+    return picked
+
+
 def run_tiny_overfit_test(
     model: nn.Module,
     dataset: TrackB1Dataset,
@@ -398,9 +458,12 @@ def run_tiny_overfit_test(
     logger.info("GATE B: Running tiny overfit test")
     logger.info("=" * 60)
 
-    # Create tiny subset
+    # Create tiny subset, spread across classes. Taking the first N rows instead would
+    # draw them all from one candidate and almost always one class, and a model that
+    # memorises a single-class batch by collapsing to a constant proves nothing about
+    # the pipeline this gate exists to check.
     num_samples = min(config.tiny_overfit_samples, len(dataset))
-    indices = list(range(num_samples))
+    indices = _stratified_indices(dataset, num_samples)
     tiny_dataset = Subset(dataset, indices)
 
     tiny_loader = DataLoader(
@@ -674,9 +737,12 @@ def train(
             device=str(device),
         )
 
-    # Setup optimizer
+    # Setup optimizer. When backbone blocks are unfrozen they need a far smaller step
+    # than the head: the backbone is pretrained and the head is not, so a single rate
+    # either scrambles the backbone or leaves the head barely trained. Head keeps
+    # config.learning_rate; unfrozen encoder parameters get config.backbone_lr.
     optimizer = AdamW(
-        model.get_trainable_params(),
+        _parameter_groups(model, config),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )

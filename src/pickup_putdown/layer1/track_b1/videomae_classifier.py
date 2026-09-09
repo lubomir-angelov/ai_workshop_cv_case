@@ -500,7 +500,12 @@ def load_checkpoint(
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     resolved_device = _resolve_device(device)
-    checkpoint = torch.load(checkpoint_path, map_location=resolved_device)
+    # weights_only=False: our own checkpoints embed the epoch's metrics, which include
+    # numpy scalars that torch 2.6+ refuses to unpickle under the safe default. These
+    # files are written by this package's own save_checkpoint, not fetched from anywhere.
+    checkpoint = torch.load(
+        checkpoint_path, map_location=resolved_device, weights_only=False
+    )
 
     # Create model if not provided
     if model is None:

@@ -62,7 +62,10 @@ VIDEO ?= $(TRIAGE_INPUT)
 	annotation-pull annotation-up annotation-down annotation-restart annotation-status annotation-logs \
 	annotation-config-validate annotation-test annotation-acceptance annotation-reset \
  candidates-remote candidates-download candidates-upload candidates-generate candidates-process-local \
- track-a-dataset train-track-a infer-track-a evaluate-track-a
+ track-a-dataset train-track-a infer-track-a evaluate-track-a \
+ cvat-export track-b1-dataset track-b1-cache track-b1-embeddings \
+ train-track-b1-head train-track-b1 infer-track-b1 track-b1-inspect \
+ track-b1-sources tune-track-b1-thresholds track-b1-results track-b1-all
 
 # ---------------------------------------------------------------------------
 # General development targets
@@ -630,3 +633,108 @@ infer-track-a: ## Run Track A inference pipeline on candidates
 	$$TRACK_A_EXTRA_ARGS \
 	-v
 
+
+# ---------------------------------------------------------------------------
+# Track B1: VideoMAE window classifier (task_12)
+#
+# Ground truth is CVAT source-video annotation. Actor crop boxes come from the
+# annotation tracks, so no pose-pipeline output is needed for these clips.
+#
+# Full path from a fresh checkout:
+#   make cvat-export          # completed CVAT jobs -> S3 + .local/cvat_exports
+#   make track-b1-sources     # 18 GB of 4K source video from S3
+#   make track-b1-dataset     # canonical events/clips/tracks + window manifest
+#   make track-b1-inspect     # Gate A: eyeball the loader before training
+#   make track-b1-cache       # per-candidate crop cache (decode once, not per epoch)
+#   make track-b1-embeddings  # frozen-backbone features (valid while frozen)
+#   make train-track-b1-head  # Gate B + head training
+#   make infer-track-b1       # sliding-window decode + Task 8 metrics
+# ---------------------------------------------------------------------------
+
+# Native arm64 interpreter: the x86 conda env runs under Rosetta, where torch is
+# capped at 2.2.2 and Conv3D is unsupported on MPS.
+TRACK_B1_PYTHON ?= .venv-arm64/bin/python
+
+TRACK_B1_EXPORT_DATE ?= 2026-09-09
+TRACK_B1_EXPORT_DIR ?= .local/cvat_exports/$(TRACK_B1_EXPORT_DATE)
+TRACK_B1_VIDEO_DIR ?= .local/source_videos
+TRACK_B1_DATASET_DIR ?= .local/track_b1_dataset
+TRACK_B1_CACHE_DIR ?= .local/track_b1_cache
+TRACK_B1_EMBEDDINGS_DIR ?= .local/track_b1_embeddings
+TRACK_B1_RUN_DIR ?= .local/track_b1_run
+TRACK_B1_MODEL ?= MCG-NJU/videomae-base
+TRACK_B1_WORKERS ?= 6
+TRACK_B1_SPLIT ?= val
+
+cvat-export: ## Export completed CVAT jobs to S3 (read-only with respect to CVAT)
+	@echo "=== Exporting CVAT annotations ($(TRACK_B1_EXPORT_DATE)) ==="
+	@$(PYTHON) scripts/export_cvat_annotations.py --export-date "$(TRACK_B1_EXPORT_DATE)"
+
+track-b1-sources: ## Download the annotated source videos named in the export manifest
+	@echo "=== Downloading annotated source videos ==="
+	@./scripts/download_annotated_sources.sh \
+		"$(TRACK_B1_EXPORT_DIR)/export_manifest.csv" "$(TRACK_B1_VIDEO_DIR)"
+
+track-b1-dataset: ## Import CVAT annotations into canonical tables + window manifest
+	@echo "=== Building Track B1 dataset ==="
+	@$(TRACK_B1_PYTHON) scripts/build_track_b1_dataset.py \
+		--export-dir "$(TRACK_B1_EXPORT_DIR)" \
+		--video-dir "$(TRACK_B1_VIDEO_DIR)" \
+		--output-dir "$(TRACK_B1_DATASET_DIR)"
+
+track-b1-inspect: ## Gate A: render sampled-frame grids from the loader
+	@echo "=== Track B1 Gate A: visual loader inspection ==="
+	@$(TRACK_B1_PYTHON) scripts/inspect_track_b1_windows.py \
+		--dataset-dir "$(TRACK_B1_DATASET_DIR)" \
+		--video-dir "$(TRACK_B1_VIDEO_DIR)"
+
+track-b1-cache: ## Build the per-candidate crop cache
+	@echo "=== Building Track B1 crop cache ==="
+	@$(TRACK_B1_PYTHON) scripts/build_track_b1_cache.py \
+		--dataset-dir "$(TRACK_B1_DATASET_DIR)" \
+		--video-dir "$(TRACK_B1_VIDEO_DIR)" \
+		--cache-dir "$(TRACK_B1_CACHE_DIR)" \
+		--workers $(TRACK_B1_WORKERS)
+
+track-b1-embeddings: ## Precompute frozen-backbone embeddings for every window
+	@echo "=== Precomputing Track B1 embeddings ==="
+	@$(TRACK_B1_PYTHON) scripts/precompute_track_b1_embeddings.py \
+		--dataset-dir "$(TRACK_B1_DATASET_DIR)" \
+		--cache-dir "$(TRACK_B1_CACHE_DIR)" \
+		--output-dir "$(TRACK_B1_EMBEDDINGS_DIR)" \
+		--model-name "$(TRACK_B1_MODEL)"
+
+train-track-b1-head: ## Gate B + train the head on cached embeddings (fast path)
+	@echo "=== Training Track B1 head ==="
+	@$(TRACK_B1_PYTHON) scripts/train_track_b1_head.py \
+		--embeddings-dir "$(TRACK_B1_EMBEDDINGS_DIR)" \
+		--output-dir "$(TRACK_B1_RUN_DIR)"
+
+train-track-b1: ## Train through the full pixel path (needed to unfreeze backbone blocks)
+	@echo "=== Training Track B1 (full pixel path) ==="
+	@$(TRACK_B1_PYTHON) scripts/train_track_b1.py \
+		--dataset-dir "$(TRACK_B1_DATASET_DIR)" \
+		--cache-dir "$(TRACK_B1_CACHE_DIR)" \
+		--output-dir "$(TRACK_B1_RUN_DIR)" \
+		--model-name "$(TRACK_B1_MODEL)"
+
+infer-track-b1: ## Sliding-window inference + shared Task 8 evaluation
+	@echo "=== Track B1 inference on $(TRACK_B1_SPLIT) ==="
+	@$(TRACK_B1_PYTHON) scripts/infer_track_b1.py \
+		--dataset-dir "$(TRACK_B1_DATASET_DIR)" \
+		--cache-dir "$(TRACK_B1_CACHE_DIR)" \
+		--checkpoint "$(TRACK_B1_RUN_DIR)/checkpoints/head_best.pt" \
+		--output-dir "$(TRACK_B1_RUN_DIR)/predictions" \
+		--model-name "$(TRACK_B1_MODEL)" \
+		--split "$(TRACK_B1_SPLIT)"
+
+tune-track-b1-thresholds: ## Tune decode thresholds on validation window scores only
+	@echo "=== Tuning Track B1 thresholds (validation only) ==="
+	@$(TRACK_B1_PYTHON) scripts/tune_track_b1_thresholds.py \
+		--dataset-dir "$(TRACK_B1_DATASET_DIR)" \
+		--run-dir "$(TRACK_B1_RUN_DIR)"
+
+track-b1-results: ## Print the consolidated Track B1 metrics comparison
+	@$(TRACK_B1_PYTHON) scripts/report_track_b1_results.py --output .local/track_b1_RESULTS.md
+
+track-b1-all: track-b1-dataset track-b1-cache track-b1-embeddings train-track-b1-head infer-track-b1 ## Full Track B1 pipeline from an existing export

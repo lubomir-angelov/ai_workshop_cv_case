@@ -38,8 +38,7 @@ CVAT_ORG = "CVCASE"
 EXPORT_FORMAT = "CVAT for video 1.1"
 
 S3_BUCKET = "chillnbite-cameras"
-EXPORT_DATE = "2026-09-07"
-S3_PREFIX = f"anon/annotations/cvat/{EXPORT_DATE}/raw"
+S3_PREFIX_TEMPLATE = "anon/annotations/cvat/{export_date}/raw"
 
 MANIFEST_NAME = "export_manifest.csv"
 MANIFEST_COLUMNS = [
@@ -162,12 +161,18 @@ def s3_client() -> Any:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out-dir", default=str(REPO_ROOT / ".local" / "cvat_exports" / EXPORT_DATE))
+    parser.add_argument(
+        "--export-date",
+        default=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        help="Export snapshot date; names the local out-dir and the S3 prefix (default: today, UTC)",
+    )
+    parser.add_argument("--out-dir", default=None, help="Default: .local/cvat_exports/<export-date>")
     parser.add_argument("--dry-run", action="store_true", help="Select and report, do not export or upload")
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args(argv)
 
-    out_dir = Path(args.out_dir)
+    s3_prefix = S3_PREFIX_TEMPLATE.format(export_date=args.export_date)
+    out_dir = Path(args.out_dir or REPO_ROOT / ".local" / "cvat_exports" / args.export_date)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     client = cvat_client()
@@ -202,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
             failures.append((record["name"], count_error))
             continue
 
-        s3_key = f"{S3_PREFIX}/{archive.name}"
+        s3_key = f"{s3_prefix}/{archive.name}"
         s3_uri = f"s3://{S3_BUCKET}/{s3_key}"
         try:
             s3.upload_file(str(archive), S3_BUCKET, s3_key)
@@ -231,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         writer.writeheader()
         writer.writerows(rows)
 
-    manifest_key = f"{S3_PREFIX}/{MANIFEST_NAME}"
+    manifest_key = f"{s3_prefix}/{MANIFEST_NAME}"
     s3.upload_file(str(manifest_path), S3_BUCKET, manifest_key)
     print(f"\nManifest -> s3://{S3_BUCKET}/{manifest_key}  ({len(rows)} rows)")
 
