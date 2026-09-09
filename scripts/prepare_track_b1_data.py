@@ -201,17 +201,34 @@ def main() -> None:
     frames: list[pd.DataFrame] = []
     for clip_id in sorted(work["clip_id"]):
         video = VIDEOS / f"{clip_id}.mp4"
+
         if not video.is_file():
             fail(f"missing source video: {video}")
         meta = META / clip_id / f"{clip_id}.json"
+        
         if not meta.is_file():
             fail(f"missing candidate metadata: {meta}")
         task5 = run_tasks_3_5(clip_id)
-        shutil.copy2(task5 / "tracks_pose.parquet", OUT / "pose_tracks" / f"{clip_id}.parquet")
-        shutil.copy2(
-            task5 / "candidates.parquet", OUT / "candidates_perclip" / f"{clip_id}.parquet"
-        )
+
+        pose = pd.read_parquet(task5 / "tracks_pose.parquet")
         local = pd.read_parquet(task5 / "candidates.parquet")
+
+        # RUN_ID=b1_<clip_id> controls the output directory, but dataset identity
+        # must remain the original source-video clip_id used by CVAT.
+        if "clip_id" in pose.columns:
+            pose["clip_id"] = clip_id
+
+        local["clip_id"] = clip_id
+
+        pose.to_parquet(
+            OUT / "pose_tracks" / f"{clip_id}.parquet",
+            index=False,
+        )
+        local.to_parquet(
+            OUT / "candidates_perclip" / f"{clip_id}.parquet",
+            index=False,
+        )
+
         cross_check(
             clip_id, load_s3_candidates(clip_id), local, events[events["clip_id"] == clip_id]
         )

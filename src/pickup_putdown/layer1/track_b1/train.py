@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from xml.parsers.expat import model
 
 import numpy as np
 import torch
@@ -76,14 +77,19 @@ class TrainConfig:
 
     # Tiny overfit test (Gate B)
     tiny_overfit_samples: int = 16
-    tiny_overfit_max_steps: int = 200
+    tiny_overfit_max_steps: int = 1000
     tiny_overfit_target_loss: float = 0.1
 
     # Logging
     log_every_n_steps: int = 10
 
+    # Prepared uint8 windows are cached lazily across epochs and restarts.
+    num_workers: int = 4
+    cache_frames: bool = True
+    frame_cache_dir: str = ".local/track_b1_frame_cache"
+
     # Model config
-    model_name: str = "MCG-NJU/videomae-small"
+    model_name: str = "MCG-NJU/videomae-base"
     freeze_backbone: bool = True
     unfreeze_last_n_blocks: int = 0
     dropout: float = 0.1
@@ -224,19 +230,26 @@ def train_one_epoch(
     all_labels = []
 
     num_batches = len(dataloader)
-    log_interval = max(1, num_batches // 10)  # Log ~10 times per epoch
+    log_interval = max(1, config.log_every_n_steps)
 
     start_time = time.time()
 
+    last_batch_end = time.perf_counter()
+    data_wait_total = 0.0
+    compute_total = 0.0
+    logger.info("Waiting for first training batch (cold cache includes video decoding)...")
     for batch_idx, batch in enumerate(dataloader):
+        batch_ready = time.perf_counter()
+        data_wait = batch_ready - last_batch_end
+        data_wait_total += data_wait
         # Move data to device
-        pixel_values = batch["pixel_values"].to(device)
-        labels = batch["label"].to(device)
+        pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+        labels = batch["label"].to(device, non_blocking=True)
 
         # Get sample weights if available
         sample_weights = batch.get("sample_weight")
         if sample_weights is not None:
-            sample_weights = sample_weights.to(device)
+            sample_weights = sample_weights.to(device, non_blocking=True)
 
         # Forward pass
         optimizer.zero_grad()
@@ -272,14 +285,24 @@ def train_one_epoch(
         all_predictions.append(predictions.cpu())
         all_labels.append(labels.cpu())
 
+        # Scalar/CPU metric reads above synchronize GPU work, so this is
+        # transfer + compute + metrics wall time, not pure GPU kernel time.
+        compute_s = time.perf_counter() - batch_ready
+        compute_total += compute_s
         # Logging
-        if (batch_idx + 1) % log_interval == 0 or batch_idx == num_batches - 1:
+        if batch_idx == 0 or (batch_idx + 1) % log_interval == 0 or batch_idx == num_batches - 1:
             current_lr = optimizer.param_groups[0]["lr"]
             batch_acc = (predictions == labels).float().mean().item()
             logger.info(
                 f"Epoch {epoch} [{batch_idx + 1}/{num_batches}] "
-                f"loss={loss.item():.4f} acc={batch_acc:.4f} lr={current_lr:.2e}"
+                f"loss={loss.item():.4f} acc={batch_acc:.4f} lr={current_lr:.2e} "
+                f"data_wait={data_wait:.2f}s compute={compute_s:.2f}s "
+                f"avg_wait={data_wait_total / (batch_idx + 1):.2f}s "
+                f"avg_compute={compute_total / (batch_idx + 1):.2f}s "
+                f"cache_hits={int(batch['cache_hit'].sum()) if 'cache_hit' in batch else 0}/{labels.size(0)}"
             )
+
+        last_batch_end = time.perf_counter()
 
     # Compute epoch metrics
     epoch_loss = total_loss / total_samples
@@ -337,8 +360,8 @@ def validate(
     all_labels = []
 
     for batch in dataloader:
-        pixel_values = batch["pixel_values"].to(device)
-        labels = batch["label"].to(device)
+        pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+        labels = batch["label"].to(device, non_blocking=True)
 
         # Forward pass
         logits = model(pixel_values)
@@ -421,14 +444,15 @@ def run_tiny_overfit_test(
 
     # Get the single batch
     batch = next(iter(tiny_loader))
-    pixel_values = batch["pixel_values"].to(device)
-    labels = batch["label"].to(device)
+    pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+    labels = batch["label"].to(device, non_blocking=True)
 
     logger.info(f"Tiny overfit test: {num_samples} samples")
     logger.info(f"Label distribution: {torch.bincount(labels, minlength=3).tolist()}")
 
-    # Training loop
-    model.train()
+    # Disable dropout for deterministic memorization.
+    # eval() still allows gradients and optimizer updates.
+    model.eval()
     initial_loss = None
 
     for step in range(config.tiny_overfit_max_steps):
@@ -683,7 +707,7 @@ def train(
 
     # Setup loss function
     if class_weights is not None:
-        class_weights = class_weights.to(device)
+        class_weights = class_weights.to(device, non_blocking=True)
         criterion = nn.CrossEntropyLoss(weight=class_weights)
         logger.info(f"Using class weights: {class_weights.tolist()}")
     else:
@@ -899,7 +923,8 @@ def main(
         raise ValueError("No validation samples found!")
 
     # Create dataloaders
-    logger.info("Creating dataloaders...")
+    logger.info("Creating dataloaders: workers=%d, frame_cache=%s",
+                config.num_workers, config.frame_cache_dir if config.cache_frames else "disabled")
     train_loader, val_loader = create_dataloaders(
         train_manifest=train_manifest,
         val_manifest=val_manifest,
@@ -908,7 +933,8 @@ def main(
         shelf_regions=shelf_regions,
         config=window_config,
         batch_size=config.batch_size,
-        num_workers=4,
+        num_workers=config.num_workers,
+        cache_dir=Path(config.frame_cache_dir) if config.cache_frames else None,
         clips_df=clips_df,
     )
 

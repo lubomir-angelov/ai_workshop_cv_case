@@ -9,7 +9,7 @@
 # =============================================================================
 model:
   # HuggingFace model name or path
-  model_name: "MCG-NJU/videomae-small"
+  model_name: "MCG-NJU/videomae-base"
   num_classes: 3  # background, pickup, putdown
 
   # Backbone freezing strategy
