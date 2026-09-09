@@ -1,6 +1,8 @@
 # Plan: restore S3 data + Track B1 (VideoMAE) training on this device
 
-> **Status:** not started. **Branch:** `feature/human_annotation_track_b`.
+> **Status:** P0 + P1a done, 1b + P3 scripts written and verified (2026-09-09); downloads +
+> GPU runs pending manual execution (see session log at bottom).
+> **Branch:** `feature/human_annotation_track_b`.
 > **Goal:** download all S3 data/models to this (fresh) device, build the human-annotation
 > dataset, then train + evaluate Track B1 on human GT first, VLM GT second.
 
@@ -74,16 +76,18 @@ source videos).
 
 ## Phase 2 — Human dataset from CVAT export (~5 min)
 
-Layout fix first: converter expects metadata as `<dir>/<clip_id>/<clip_id>.json`
-(scripts/convert_cvat_source_export.py:48); S3 stores flat `metadata/<clip_id>.json` →
-restructure into `.local/candidate_staging/candidates/<clip_id>/<clip_id>.json` (also the
-layout Track A CLIs expect).
+Resolved from the 2026-09-09 inventory: actual S3 prefix is `anon/annotations/cvat/<date>/raw/`
+(two dates: 09-07 = 32 clips, 09-09 = 42 clips — **use 09-09**, strict superset with identical
+sizes for overlapping zips). No layout fix needed: S3 metadata is already nested
+`metadata/<clip_id>/<clip_id>.json` (the plan's flat-layout assumption was wrong), and the
+converter's default `--candidate-meta-dir .local/candidate_staging/candidates` matches the
+download layout.
 
 ```bash
 python scripts/convert_cvat_source_export.py \
-  --cvat-export-dir .local/annotations/cvat_2026-09-07/unzipped \
+  --cvat-export-dir .local/annotations/cvat/2026-09-09/raw \
   --clips-csv .local/task_7_vlm/clips.csv \
-  --manifest .local/annotations/cvat_2026-09-07/raw/export_manifest.csv \
+  --manifest .local/annotations/cvat/2026-09-09/raw/export_manifest.csv \
   --output-dir .local/task_7_human
 ```
 
@@ -212,3 +216,104 @@ vs `.local/task_7_human/events.csv` (filtered to val clips) → `metrics.json`
   and are enough for two runs. Add when this becomes a repeated workflow.
 - No code fix for the nested-yaml config mismatch, no unfreeze run, no Track A rebuild — all
   follow-ups, not blockers.
+
+## Session log — 2026-09-09
+
+### Where we are
+
+| Phase | Status |
+|---|---|
+| P0 environment | **done** (verified) |
+| P1a inventory | **done** (`.local/s3_inventory.txt`) |
+| P1b download script | **written + verified; not yet run** (manual, ~307 GB) |
+| P2 human dataset | no implementation needed — converter exists; command paths fixed above; run after download steps 1–2 |
+| P3 data prep | **written + verified; not yet run** (needs data + GPU) |
+| P4 train | no implementation needed — `train.py` exists; run when GPU free |
+| P5 inference + eval | no implementation needed — `inference.py` + Task-8 evaluator exist |
+
+**No further implementation is required before running.** The only conditional code is
+risk #4 (extend clips registry via `pickup_putdown.ingestion.video_probe`) — implement only
+if the Phase 2 converter hard-exits on a clip missing from `task_7_vlm/clips.csv`.
+
+### P0 verification
+
+- Disk 657 GB free vs 306.9 GB bucket = 2.3× (gate ≥1.5× passed).
+- RTX 5090 (32 GB); torch 2.14.0+cu130, `cuda.is_available()=True`, sm_120.
+  **~27 GB GPU RAM held by `llama-server` — kill it before pose generation/training.**
+- AWS creds OK; `awscli` was missing → installed into the venv.
+- venv `/home/ubuntu/venvs/ai_workshop_cv_case`; added `transformers 5.16.1`, `accelerate`,
+  dev extras (pytest/mypy), `shellcheck-py`.
+- `make models` ✓ → `models/person_detector.pt`, `models/pose_detector.pt`.
+- VideoMAE-small HF pull still deferred to first model load (~90 MB).
+
+### P1a inventory findings (5139 objects, 306.9 GB)
+
+| Prefix | Size | Note |
+|---|---|---|
+| `anon/*.mp4` (root, 395 files) | 274.6 GB | B1 only needs ~42 of these; step 6 of the download is skippable for B1-only |
+| `anon/candidates/videos` (1527) | 32.3 GB | |
+| `anon/candidates/metadata` (75) | 0.5 MB | already nested `<clip>/<clip>.json` |
+| `anon/vlm/2026-06-26/{vlm_annotations,task_7_vlm,task_7_review}` | 4.6 MB | task_7_vlm has clips.csv |
+| `anon/annotations/cvat/{2026-09-07,2026-09-09}/raw` | 5.4 MB | **use 2026-09-09** (42 clips, superset of 09-07's 32) |
+| Track A1 results | — | **absent** (risk #6 confirmed); download step 4 logs + skips |
+
+### Files added this session
+
+- `scripts/download_all_staged.sh` — staged syncs, small→large; referenced videos pulled in
+  manifest → metadata → registry priority; missing referenced videos recorded in
+  `.local/missing_videos.txt` and fail the run at the end (not mid-download).
+- `scripts/prepare_track_b1_data.py` — P3: per-clip `make tasks-3-5 RUN_ID=b1_<clip>
+  RENDER_PREVIEWS=0` (skips when outputs exist → resumable), flat pose/candidate copies,
+  `candidates.parquet` from S3 metadata JSONs (source of truth) with hard cross-check vs
+  regenerated task_5 (candidate ids, window bounds, actor_id, region_id),
+  `candidates_val.parquet`, copies of events/ignore/clips, window label distribution via the
+  project's own `build_window_manifest`, non-zero exit on empty split / missing poses.
+
+### Verification run this session
+
+- `shellcheck scripts/download_all_staged.sh` ✓ · `bash -n` ✓
+- `ruff check` + `ruff format --check` on both new scripts ✓
+- prep script error path: clean `ERROR: missing input … exit=1`
+- `python -m pytest`: all pass, 1 skip, exit 0 · `python -m compileall src` ✓
+- Baseline note: `ruff check .` shows 60 pre-existing violations under ruff 0.15.12
+  (version drift vs the `ruff>=0.4` pin, all in committed src/stub scripts) — not touched.
+
+### Runbook (manual, in order)
+
+```bash
+# 1. downloads (~307 GB total; B1 needs only steps 1-3, stop after step 5 to skip 275 GB)
+nohup bash scripts/download_all_staged.sh > .local/downloads.log 2>&1 &
+tail -f .local/downloads.log
+
+# 2. human dataset (after download steps 1-2 land; ~5 min)
+python scripts/convert_cvat_source_export.py \
+  --cvat-export-dir .local/annotations/cvat/2026-09-09/raw \
+  --clips-csv .local/task_7_vlm/clips.csv \
+  --manifest .local/annotations/cvat/2026-09-09/raw/export_manifest.csv \
+  --output-dir .local/task_7_human
+
+# 3. B1 data prep (GPU: runs tasks-3-5 per clip; resumable)
+python scripts/prepare_track_b1_data.py
+
+# 4. train run 1: human GT (GPU, hours; Gate B tiny-overfit runs first automatically)
+python -m pickup_putdown.layer1.track_b1.train \
+  .local/track_b1_data/candidates.parquet .local/track_b1_data/events_human.csv \
+  .local/track_b1_data/clips.csv .local/source_videos .local/track_b1_data/pose_tracks \
+  configs/shelves.yaml .local/track_b1_output_human \
+  --ignore-intervals-path .local/track_b1_data/ignore_intervals.parquet
+
+# 4b. train run 2: VLM GT
+python -m pickup_putdown.layer1.track_b1.train \
+  .local/track_b1_data/candidates.parquet .local/track_b1_data/events_vlm.csv \
+  .local/track_b1_data/clips.csv .local/source_videos .local/track_b1_data/pose_tracks \
+  configs/shelves.yaml .local/track_b1_output_vlm
+
+# 5. inference + eval (val split)
+python -m pickup_putdown.layer1.track_b1.inference \
+  .local/track_b1_output_human/checkpoints/best_model.pt \
+  .local/track_b1_data/candidates_val.parquet .local/track_b1_data/clips.csv \
+  .local/source_videos .local/track_b1_data/pose_tracks configs/shelves.yaml \
+  .local/track_b1_output_human/predictions_val.csv
+# then Task-8 shared evaluator (pickup_putdown.evaluation.aggregate_metrics) vs
+# .local/task_7_human/events.csv filtered to val clips -> metrics.json (tIoU 0.3/0.5)
+```
