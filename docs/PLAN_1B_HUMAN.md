@@ -221,19 +221,73 @@ vs `.local/task_7_human/events.csv` (filtered to val clips) → `metrics.json`
 
 ### Where we are
 
-| Phase | Status |
+| Phase | Status (end of session 2026-09-09) |
 |---|---|
-| P0 environment | **done** (verified) |
-| P1a inventory | **done** (`.local/s3_inventory.txt`) |
-| P1b download script | **written + verified; not yet run** (manual, ~307 GB) |
-| P2 human dataset | no implementation needed — converter exists; command paths fixed above; run after download steps 1–2 |
-| P3 data prep | **written + verified; not yet run** (needs data + GPU) |
-| P4 train | no implementation needed — `train.py` exists; run when GPU free |
-| P5 inference + eval | no implementation needed — `inference.py` + Task-8 evaluator exist |
+| P0 environment | ✅ done (verified) |
+| P1a inventory | ✅ done (`.local/s3_inventory.txt`) |
+| P1b downloads | ✅ done (286 GB, 0 missing, clean exit; idempotency re-run verified) |
+| P2 human dataset | ✅ done (281 events, 3 ignores, 42 clips, split assigned) |
+| P3 data prep | 🔄 27/42 clips done — resume via Next steps item 3 |
+| P4 train | ⬜ pending (needs free GPU: kill `llama-server`, ~27 GB) |
+| P5 inference + eval | ⬜ pending |
 
-**No further implementation is required before running.** The only conditional code is
-risk #4 (extend clips registry via `pickup_putdown.ingestion.video_probe`) — implement only
-if the Phase 2 converter hard-exits on a clip missing from `task_7_vlm/clips.csv`.
+No implementation work remains for P4/P5 — existing module entry points (runbook below).
+
+**Step 1 launch (2026-09-09 11:04 UTC):** steps 1–3a done in ~45 s; step 3b pulling the
+~42 manifest clips at ~30 MB/s (~10–15 min); steps 5–6 (32 + 275 GB) are the long tail
+(hours). 09-09 clip set confirmed in the queue (extra clips like `D2_S20260520141225…`
+present).
+
+**P2 converter (2026-09-09 14:07 UTC):** exit 0, all 42 clips in registry (risk #4 did
+not fire). 261 tracks (177 pickup / 104 putdown) → 281 events (item_count expanded), 3
+ignore intervals, provenance 267/281 candidate-matched, 42 clips (7 verified-negative),
+review manifest 740 rows (603 positive / 137 negative).
+
+**Split gap (found in P2 verification):** `task_7_vlm/clips.csv` has `split` and
+`session_id` columns but **both are entirely empty** (all 374 rows) — Task-7
+session-aware splits were never implemented or uploaded (`src/pickup_putdown/data/splits.py`
+does not exist). B1 cannot train without a split, so `prepare_track_b1_data.py` now
+assigns one deterministically when the registry split is empty: group clips by recording
+day (from clip id `S<YYYYMMDD>`), rank days by sha256(seed:day), lowest ~20% (≥1 day)
+→ val. Seed `b1-human-2026-09-09`. Result: val = 20260526 (12 clips, 23 pickup + 12
+putdown events), train = other 4 days (30 clips, 154 pickup + 92 putdown). The assignment
+is written to `.local/track_b1_data/clips.csv` only (converter output stays pristine); a
+real non-empty registry split is honored as-is.
+
+**Registry key fix (download 3b):** all 374 registry `s3_key` values carry a stale
+`source_videos/` prefix (e.g. `source_videos/D2_…mp4`) while the actual objects sit at
+the bucket root — the first run logged 299 bogus `MISSING` entries (human 42 + metadata
+75 clips were unaffected). `collect_clips` registry branch now resolves keys to
+bucket-root names via `.local/s3_inventory.txt` (374/374 resolve; shellcheck + offline
+re-check green).
+
+### P3 design decisions (in `scripts/prepare_track_b1_data.py`; verified on the 27 done clips)
+
+- B1 candidate set = **locally regenerated task_5 output**, not the S3 JSONs: S3 metadata
+  carries no actor_id/region_id at all (0/1527 candidates) and candidate ids drift between
+  the two generator configs (zero id overlap, temporal overlap both ways). S3 JSONs remain
+  provenance + per-clip drift diagnostics.
+- Coverage diagnostics are **warnings, never fatal**: window drift in either direction and
+  human events outside every candidate window (generator recall gap — 20/281 events across
+  the 28 clips checked, 14 of them in neither snapshot) are logged per clip with event ids.
+- `make tasks-3-5` gets 3 attempts (decode-pipeline 10 s slot timeouts flake under load).
+- Resumable: clips with existing task_5 outputs are skipped.
+
+### Next steps (status at end of session 2026-09-09)
+
+1. ✅ **Downloads complete** (12:54 UTC): all 6 steps, 286 GB, 0 missing, clean exit;
+   idempotency re-run verified (all skipped, clean exit).
+2. ✅ **P2 converter + split** — see blocks above (281 events; val = 20260526).
+3. 🔄 **P3 resume — NEXT ACTION (~1.5–2.5 h GPU):**
+   `nohup python scripts/prepare_track_b1_data.py >> .local/track_b1_prep.log 2>&1 &`
+   Skips the 27 done clips, processes the remaining 15. Expect per-clip `WARNING` lines
+   (S3 drift + events excluded from training) — normal. Verify at the end: final line
+   `wrote .local/track_b1_data/candidates.parquet (N candidates, 42 clips)`, per-split
+   window/label distribution lines, and `ls .local/track_b1_data/pose_tracks | wc -l` = 42.
+4. ⬜ **P4:** kill `llama-server` (frees ~27 GB GPU), then run 1 human GT → run 2 VLM GT
+   (commands in the Runbook below), one at a time, nohup'd.
+5. ⬜ **P5:** val-split inference + Task-8 metrics, both runs reported side by side
+   (Runbook below).
 
 ### P0 verification
 
@@ -263,11 +317,12 @@ if the Phase 2 converter hard-exits on a clip missing from `task_7_vlm/clips.csv
   manifest → metadata → registry priority; missing referenced videos recorded in
   `.local/missing_videos.txt` and fail the run at the end (not mid-download).
 - `scripts/prepare_track_b1_data.py` — P3: per-clip `make tasks-3-5 RUN_ID=b1_<clip>
-  RENDER_PREVIEWS=0` (skips when outputs exist → resumable), flat pose/candidate copies,
-  `candidates.parquet` from S3 metadata JSONs (source of truth) with hard cross-check vs
-  regenerated task_5 (candidate ids, window bounds, actor_id, region_id),
-  `candidates_val.parquet`, copies of events/ignore/clips, window label distribution via the
-  project's own `build_window_manifest`, non-zero exit on empty split / missing poses.
+  RENDER_PREVIEWS=0` (skips when outputs exist → resumable; 3 attempts per clip), flat
+  pose/candidate copies, `candidates.parquet` from the regenerated task_5 output (S3 JSONs
+  = provenance + per-clip coverage diagnostics, warnings only), deterministic recording-day
+  train/val split when the registry split is empty, `candidates_val.parquet`, copies of
+  events/ignore/clips, window label distribution via the project's own
+  `build_window_manifest`, non-zero exit on empty split / missing poses.
 
 ### Verification run this session
 

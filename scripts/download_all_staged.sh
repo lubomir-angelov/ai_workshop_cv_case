@@ -57,12 +57,24 @@ elif label == "metadata":
         vid = data.get("source_video_id") or p.parent.name
         add(vid + ".mp4", vid + ".mp4")
 elif label == "registry":
+    # registry s3_keys carry a stale "source_videos/" prefix; actual objects are
+    # at the bucket root, so resolve bare names against the local inventory
+    inv_root = set()
+    inv = Path(".local/s3_inventory.txt")
+    if inv.is_file():
+        inv_root = {
+            Path(line.split()[-1]).name
+            for line in inv.read_text().splitlines()
+            if line.strip()
+        }
     p = Path(".local/task_7_vlm/clips.csv")
     if p.exists():
         for row in csv.DictReader(p.open()):
             key = (row.get("s3_key") or row.get("clip_id") or "").strip()
             if key and not key.endswith(".mp4"):
                 key += ".mp4"
+            if key and Path(key).name in inv_root:
+                key = Path(key).name
             if key:
                 add(key, Path(key).name)
 
