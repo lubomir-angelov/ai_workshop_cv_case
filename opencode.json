@@ -4,10 +4,10 @@
     "context-engine": {
       "type": "local",
       "command": [
-        "/home/naim/.local/bin/cce",
+        "/home/ubuntu/.local/bin/cce",
         "serve",
         "--project-dir",
-        "/home/naim/repos/ai_workshop_cv_case"
+        "/home/ubuntu/repos/ai_workshop_cv_case"
       ]
     }
   }
