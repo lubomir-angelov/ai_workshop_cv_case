@@ -77,6 +77,15 @@ class InferenceConfig:
     same_type_merge_gap_s: float = 0.75  # Merge same-type if gap < this
     min_event_duration_s: float = 0.3  # Discard events shorter than this
 
+    # How a run of above-threshold windows becomes an event interval.
+    #   "window_span"    - first window start to last window end (original behaviour)
+    #   "window_centers" - first to last window centre, widened by half a stride
+    # A window is much longer than a typical event in this data (2.5 s against a 0.9 s
+    # median), so "window_span" cannot emit an interval tighter than one window, which
+    # caps achievable tIoU at roughly event_duration / window_duration. Centres carry
+    # the temporal evidence: a window is labelled by what sits at its centre.
+    boundary_mode: str = "window_span"
+
     # Output
     model_name: str = "layer1_track_b1_videomae_window_v1"
 
@@ -460,6 +469,8 @@ def detect_score_peaks(
         class_idx=LABEL_PICKUP,
         threshold=config.pickup_threshold,
         event_type="pickup",
+        boundary_mode=config.boundary_mode,
+        min_duration_s=config.min_event_duration_s,
     )
     regions.extend(pickup_regions)
 
@@ -469,6 +480,8 @@ def detect_score_peaks(
         class_idx=LABEL_PUTDOWN,
         threshold=config.putdown_threshold,
         event_type="putdown",
+        boundary_mode=config.boundary_mode,
+        min_duration_s=config.min_event_duration_s,
     )
     regions.extend(putdown_regions)
 
@@ -480,6 +493,8 @@ def _find_regions_above_threshold(
     class_idx: int,
     threshold: float,
     event_type: str,
+    boundary_mode: str = "window_span",
+    min_duration_s: float = 0.3,
 ) -> list[ScoreRegion]:
     """Find contiguous regions where class score > threshold.
 
@@ -488,61 +503,65 @@ def _find_regions_above_threshold(
         class_idx: Class index to check (1=pickup, 2=putdown).
         threshold: Score threshold.
         event_type: Event type string for output.
+        boundary_mode: "window_span" or "window_centers"; see InferenceConfig.
+        min_duration_s: Floor applied in centre mode, where a single above-threshold
+            window would otherwise produce a zero-length interval.
 
     Returns:
         List of detected ScoreRegion.
     """
-    regions: list[ScoreRegion] = []
+    if boundary_mode not in ("window_span", "window_centers"):
+        raise ValueError(f"unknown boundary_mode {boundary_mode!r}")
 
+    regions: list[ScoreRegion] = []
     if not predictions:
         return regions
 
-    # Track current region
-    in_region = False
-    region_start = 0.0
-    region_end = 0.0
-    region_scores: list[float] = []
+    # Half the spacing between consecutive windows: the finest boundary this stride
+    # can resolve, and so the right amount to widen a centre-derived interval by.
+    if len(predictions) > 1:
+        half_stride = abs(
+            predictions[1].window_center_s - predictions[0].window_center_s
+        ) / 2
+    else:
+        half_stride = min_duration_s / 2
 
-    for pred in predictions:
-        score = float(pred.probs[class_idx])
-
-        if score > threshold:
-            if not in_region:
-                # Start new region
-                in_region = True
-                region_start = pred.window_start_s
-                region_scores = [score]
-            else:
-                # Continue region
-                region_scores.append(score)
-            region_end = pred.window_end_s
+    def close(run: list[WindowPrediction], scores: list[float]) -> None:
+        if not run:
+            return
+        if boundary_mode == "window_span":
+            start_s, end_s = run[0].window_start_s, run[-1].window_end_s
         else:
-            if in_region:
-                # End region
-                regions.append(
-                    ScoreRegion(
-                        event_type=event_type,
-                        start_s=region_start,
-                        end_s=region_end,
-                        peak_score=max(region_scores),
-                        mean_score=np.mean(region_scores),
-                    )
-                )
-                in_region = False
-                region_scores = []
-
-    # Handle region at end
-    if in_region and region_scores:
+            start_s = run[0].window_center_s - half_stride
+            end_s = run[-1].window_center_s + half_stride
+            if end_s - start_s < min_duration_s:
+                centre = (start_s + end_s) / 2
+                start_s = centre - min_duration_s / 2
+                end_s = centre + min_duration_s / 2
+            start_s = max(0.0, start_s)
         regions.append(
             ScoreRegion(
                 event_type=event_type,
-                start_s=region_start,
-                end_s=region_end,
-                peak_score=max(region_scores),
-                mean_score=np.mean(region_scores),
+                start_s=start_s,
+                end_s=end_s,
+                peak_score=max(scores),
+                mean_score=float(np.mean(scores)),
             )
         )
 
+    run: list[WindowPrediction] = []
+    scores: list[float] = []
+
+    for prediction in predictions:
+        score = float(prediction.probs[class_idx])
+        if score > threshold:
+            run.append(prediction)
+            scores.append(score)
+        else:
+            close(run, scores)
+            run, scores = [], []
+
+    close(run, scores)
     return regions
 
 
