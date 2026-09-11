@@ -1,0 +1,18 @@
+# 01_build_dataset.cmd
+python scripts/build_track_b1_dataset.py --input-mode deployment --config configs/track_b1_deployment_candidate_crop.yaml --pose-data-dir .local/track_b1_data --output-dir .local/track_b1_deploy_eval_20260911/dataset
+
+# 02_frame_cache.cmd
+bash -c 'python scripts/build_track_b1_cache.py --dataset-dir .local/track_b1_deploy_eval_20260911/dataset --split val --workers 10 && python scripts/build_track_b1_cache.py --dataset-dir .local/track_b1_deploy_eval_20260911/dataset --split test --workers 10'
+
+# 03_val_A.cmd
+until grep -q 'windows in' .local/track_b1_deploy_eval_20260911/logs/02_frame_cache.log; do sleep 10; done; .local/track_b1_deploy_eval_20260911/provenance/run_eval.sh val_A
+
+# 06_tune_B.cmd
+.local/track_b1_deploy_eval_20260911/provenance/run_eval.sh tune_B
+
+# 08_val_B.cmd
+.local/track_b1_deploy_eval_20260911/provenance/run_eval.sh val_B
+
+# 09_test.cmd
+until grep -q '^EXIT=' .local/track_b1_deploy_eval_20260911/logs/02_frame_cache.log; do sleep 15; done; .local/track_b1_deploy_eval_20260911/provenance/run_eval.sh test_A && .local/track_b1_deploy_eval_20260911/provenance/run_eval.sh test_B
+

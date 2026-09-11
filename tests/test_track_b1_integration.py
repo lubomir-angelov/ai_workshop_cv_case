@@ -278,6 +278,48 @@ def test_candidate_coverage_separates_proposal_misses_from_labelled_events():
     }
 
 
+def test_event_coverage_partition_puts_proposals_before_association():
+    """A failed association with proposals is unresolved, never a proposal miss."""
+    from pickup_putdown.layer1.track_b1.actor_association import event_coverage
+    from pickup_putdown.layer1.track_b1.dataset import generate_inference_windows
+
+    def matched(event_id, kind, t0, t1, actor):
+        return {**_event(event_id, kind, t0, t1, actor_id=actor), "association_status": "matched"}
+
+    events = pd.DataFrame(
+        [
+            matched("own", "pickup", 4.0, 6.0, "actor_1"),
+            matched("far", "putdown", 40.0, 41.0, "actor_1"),
+            matched("other", "pickup", 14.0, 15.0, "actor_1"),
+            {
+                **_event("unresolved", "pickup", 4.0, 5.0, actor_id=None),
+                "association_status": "ambiguous",
+            },
+            {
+                **_event("unmatched_far", "pickup", 40.0, 41.0, actor_id=None),
+                "association_status": "unmatched",
+            },
+            matched("edge", "putdown", 9.95, 10.05, "actor_1"),
+        ]
+    )
+    candidates = pd.DataFrame(
+        [_candidate("a", "actor_1", 0.0, 10.0), _candidate("b", "actor_2", 12.0, 17.0)]
+    )
+    windows = pd.DataFrame([w.to_dict() for w in generate_inference_windows(candidates, CONFIG)])
+
+    coverage = event_coverage(events, candidates, windows).set_index("event_id")
+
+    assert coverage["coverage"].to_dict() == {
+        "own": "own_covered",
+        "far": "no_candidate",
+        "other": "other_actor_only",
+        "unresolved": "association_unresolved",
+        "unmatched_far": "no_candidate",
+        "edge": "no_window_centre",
+    }
+    assert not coverage.loc["unresolved", "own_candidate_overlap"]
+
+
 def test_window_evidence_separates_crop_exclusion_from_sampling_gaps():
     event = pd.Series(_event("e1", "pickup", 4.0, 4.05, actor_id="trk000"))
     track = _cvat_track(box=(100, 100, 140, 140))
@@ -288,6 +330,10 @@ def test_window_evidence_separates_crop_exclusion_from_sampling_gaps():
 
     assert inside["event_box_in_crop"] == pytest.approx(1.0)
     assert cropped_out["event_box_in_crop"] == pytest.approx(0.0)
+    # contained, yet tiny at model scale: 40x40 box in a 640x480 crop
+    assert inside["event_box_share_of_crop"] == pytest.approx(1600 / (640 * 480))
+    tight = window_evidence(3.5, 4.5, 16, 20.0, (90, 90, 150, 150), event, track)
+    assert tight["event_box_share_of_crop"] == pytest.approx(1600 / 3600)
     assert inside["sampled_frames_in_event"] >= 1
     assert between_samples["sampled_frames_in_event"] == 0
 

@@ -1,0 +1,117 @@
+{
+  "written_at": "2026-09-11T15:11:20+03:00",
+  "written_before": "any deployment-input prediction of these checkpoints exists",
+  "git_commit": "3d22096c709429662dea01362a72f7ae40d25449",
+  "git_untracked_inputs": {
+    "configs/track_b1_deployment_candidate_crop.yaml": "40c515848d594f272eb705f396d64f869f62a35de4b7346c538291ae5e8e3f31"
+  },
+  "checkpoints": {
+    "frozen_head": {
+      "path": ".local/track_b1_repro_cvat_20260911/frozen_head/checkpoints/head_best.pt",
+      "sha256": "83d613f81206c6a9de3b9b3ff5289e97bf40872b0aa4fba6467acc85a576c0ba",
+      "verified_sha256": "83d613f81206c6a9de3b9b3ff5289e97bf40872b0aa4fba6467acc85a576c0ba"
+    },
+    "finetune_last2": {
+      "path": ".local/track_b1_repro_cvat_20260911/finetune_last2/checkpoints/best_model.pt",
+      "sha256": "42f15aeca48f044bbb67fbae77ad50d57233960267c3a9d9821d8fee097e5bcd",
+      "verified_sha256": "42f15aeca48f044bbb67fbae77ad50d57233960267c3a9d9821d8fee097e5bcd"
+    }
+  },
+  "secondary_not_evaluated": {
+    "finetune_last2_cold": "ablation; annotation-mode results preserved in .local/track_b1_repro_cvat_20260911, not needed for the primary comparison"
+  },
+  "deployment_dataset": {
+    "path": ".local/track_b1_deploy_eval_20260911/dataset",
+    "build_config": "configs/track_b1_deployment_candidate_crop.yaml",
+    "input_mode": "deployment",
+    "candidates": "Task 5 pose proposals (.local/track_b1_data/candidates.parquet)",
+    "crops": "pose person-box union over the candidate + 15% margin, INTER_AREA (annotation-mode preprocessing, pose boxes)",
+    "split_registry": "cvat_b1_2026_09_09",
+    "test_caveat": "20260526 (cvat_b1_2026_09_09 test day) was the human_b1 validation day and was read twice by the CVAT branch; it is a second development day, not an untouched test set."
+  },
+  "ground_truth": "all CVAT event rows of the split's clips (drafts kept, accepted_only false, as in the reproduction); ignore intervals via the shared evaluator",
+  "counting_policy": {
+    "primary": "per_item",
+    "supplementary": "per_event_group"
+  },
+  "A_fixed_decoder": {
+    "frozen_head": {
+      "same_type_merge_gap_s": 0.75,
+      "min_event_duration_s": 0.3,
+      "boundary_mode": "window_centers",
+      "window_duration_s": 1.5,
+      "window_stride_s": 0.25,
+      "tiou": [
+        0.3,
+        0.5
+      ],
+      "pickup_threshold": 0.45,
+      "putdown_threshold": 0.6,
+      "smoothing_window": 3
+    },
+    "finetune_last2": {
+      "same_type_merge_gap_s": 0.75,
+      "min_event_duration_s": 0.3,
+      "boundary_mode": "window_centers",
+      "window_duration_s": 1.5,
+      "window_stride_s": 0.25,
+      "tiou": [
+        0.3,
+        0.5
+      ],
+      "pickup_threshold": 0.5,
+      "putdown_threshold": 0.2,
+      "smoothing_window": 3
+    }
+  },
+  "B_deployment_calibration": {
+    "tuned_on": "deployment-input validation window scores only (window_scores_val.parquet from the A val run; scores do not depend on decode)",
+    "grid": {
+      "pickup_threshold": [
+        0.2,
+        0.25,
+        0.3,
+        0.35,
+        0.4,
+        0.45,
+        0.5,
+        0.55,
+        0.6,
+        0.7
+      ],
+      "putdown_threshold": [
+        0.2,
+        0.25,
+        0.3,
+        0.35,
+        0.4,
+        0.45,
+        0.5,
+        0.55,
+        0.6,
+        0.7
+      ],
+      "smoothing_window": [
+        3,
+        5
+      ]
+    },
+    "fixed": {
+      "same_type_merge_gap_s": 0.75,
+      "min_event_duration_s": 0.3,
+      "boundary_mode": "window_centers"
+    },
+    "objective": "mean per-item validation event F1 at tIoU 0.3 and 0.5 (shared evaluator, duplicate suppression applied)",
+    "tie_break": "lower smoothing, then lower pickup threshold, then lower putdown threshold (tune_track_b1_thresholds.py sort)",
+    "tool": "scripts/tune_track_b1_thresholds.py (defaults = this grid)",
+    "freeze": "selection written to deploy_calibration_selection.json before any test-split inference; never revised after"
+  },
+  "order": [
+    "A val inference (both checkpoints)",
+    "coverage on val",
+    "B tuning on val, freeze",
+    "B val decode",
+    "test: A then B inference, coverage",
+    "no decode or model change after test"
+  ]
+}

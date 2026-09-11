@@ -1,0 +1,5 @@
+date: 2026-09-11T14:51:37+03:00
+commit: 7364357103d2ab6df872fad353b3745efeae66d8
+branch: feature/unify_track_b_trainings_and_eval
+status:
+?? configs/track_b1_deployment_candidate_crop.yaml

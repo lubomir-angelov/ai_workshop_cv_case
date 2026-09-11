@@ -1,0 +1,265 @@
+{
+  "input_mode": "deployment",
+  "annotation_conditioned": false,
+  "split": "test",
+  "n_clips": 12,
+  "n_clips_without_events": 3,
+  "n_ground_truth_event_rows": 35,
+  "ground_truth_counts": {
+    "item_rows": 35,
+    "event_groups": 35,
+    "distinct_intervals": 35
+  },
+  "n_candidates": 96,
+  "n_windows": 3031,
+  "n_predictions": 34,
+  "n_suppressed_duplicates": 1,
+  "candidate_coverage": {
+    "labelled": 26,
+    "association_failed": 7,
+    "no_window_centre": 2
+  },
+  "checkpoint": ".local/track_b1_repro_cvat_20260911/frozen_head/checkpoints/head_best.pt",
+  "checkpoint_info": {
+    "kind": "head_only",
+    "epoch": 37,
+    "input_mode": "annotation"
+  },
+  "dataset_dir": ".local/track_b1_deploy_eval_20260911/dataset",
+  "split_registry": "cvat_b1_2026_09_09",
+  "preprocessing": {
+    "version": 2,
+    "num_frames": 16,
+    "image_size": [
+      224,
+      224
+    ],
+    "crop_margin": 0.15,
+    "crop_scope": "candidate",
+    "resize_interpolation": "area",
+    "include_shelf_region": false,
+    "frame_sampling": "linspace(int(start*fps), int(end*fps)-1, num_frames)",
+    "normalization": "bgr->rgb, imagenet mean/std"
+  },
+  "decode": {
+    "pickup_threshold": 0.7,
+    "putdown_threshold": 0.3,
+    "smoothing_window": 5,
+    "same_type_merge_gap_s": 0.75,
+    "min_event_duration_s": 0.3,
+    "boundary_mode": "window_centers"
+  },
+  "counting_policy": "per_item",
+  "event_metrics": {
+    "n_ground_truth_rows": 35,
+    "tiou@0.3": {
+      "precision": 0.08823529411764706,
+      "recall": 0.08571428571428572,
+      "f1": 0.08695652173913045,
+      "tp": 3,
+      "fp": 31,
+      "fn": 32
+    },
+    "tiou@0.5": {
+      "precision": 0.029411764705882353,
+      "recall": 0.02857142857142857,
+      "f1": 0.02898550724637681,
+      "tp": 1,
+      "fp": 33,
+      "fn": 34
+    },
+    "midpoint@1.0s": {
+      "precision": 0.08823529411764706,
+      "recall": 0.08571428571428572,
+      "f1": 0.08695652173913045,
+      "tp": 3,
+      "fp": 31,
+      "fn": 32
+    },
+    "start_mae_s": 0.4166666666666714,
+    "end_mae_s": 0.5500000000000019,
+    "per_type": {
+      "pickup": {
+        "precision": 0.03571428571428571,
+        "recall": 0.043478260869565216,
+        "f1": 0.0392156862745098,
+        "tp": 1,
+        "fp": 27,
+        "fn": 22
+      },
+      "putdown": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 6,
+        "fn": 12
+      }
+    },
+    "fp_per_hour": 52.18193398194716,
+    "runtime_per_video_minute": null,
+    "event_count_error_per_clip": 31,
+    "event_count_error_absolute": 1,
+    "confusion": {
+      "pickup": {
+        "pickup": 1,
+        "putdown": 0
+      },
+      "putdown": {
+        "pickup": 1,
+        "putdown": 0
+      }
+    },
+    "confusion_tiou": 0.5,
+    "mAP": {
+      "mAP@0.3": 0.03367918313570487,
+      "mAP@0.5": 0.0009881422924901185,
+      "mAP@0.7": 0.0,
+      "mAP_avg": 0.011555775142731664
+    },
+    "multi_item_recall": null,
+    "multi_item_support": 0
+  },
+  "event_metrics_by_counting_policy": {
+    "per_item": {
+      "n_ground_truth_rows": 35,
+      "tiou@0.3": {
+        "precision": 0.08823529411764706,
+        "recall": 0.08571428571428572,
+        "f1": 0.08695652173913045,
+        "tp": 3,
+        "fp": 31,
+        "fn": 32
+      },
+      "tiou@0.5": {
+        "precision": 0.029411764705882353,
+        "recall": 0.02857142857142857,
+        "f1": 0.02898550724637681,
+        "tp": 1,
+        "fp": 33,
+        "fn": 34
+      },
+      "midpoint@1.0s": {
+        "precision": 0.08823529411764706,
+        "recall": 0.08571428571428572,
+        "f1": 0.08695652173913045,
+        "tp": 3,
+        "fp": 31,
+        "fn": 32
+      },
+      "start_mae_s": 0.4166666666666714,
+      "end_mae_s": 0.5500000000000019,
+      "per_type": {
+        "pickup": {
+          "precision": 0.03571428571428571,
+          "recall": 0.043478260869565216,
+          "f1": 0.0392156862745098,
+          "tp": 1,
+          "fp": 27,
+          "fn": 22
+        },
+        "putdown": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 6,
+          "fn": 12
+        }
+      },
+      "fp_per_hour": 52.18193398194716,
+      "runtime_per_video_minute": null,
+      "event_count_error_per_clip": 31,
+      "event_count_error_absolute": 1,
+      "confusion": {
+        "pickup": {
+          "pickup": 1,
+          "putdown": 0
+        },
+        "putdown": {
+          "pickup": 1,
+          "putdown": 0
+        }
+      },
+      "confusion_tiou": 0.5,
+      "mAP": {
+        "mAP@0.3": 0.03367918313570487,
+        "mAP@0.5": 0.0009881422924901185,
+        "mAP@0.7": 0.0,
+        "mAP_avg": 0.011555775142731664
+      },
+      "multi_item_recall": null,
+      "multi_item_support": 0
+    },
+    "per_event_group": {
+      "n_ground_truth_rows": 35,
+      "tiou@0.3": {
+        "precision": 0.08823529411764706,
+        "recall": 0.08571428571428572,
+        "f1": 0.08695652173913045,
+        "tp": 3,
+        "fp": 31,
+        "fn": 32
+      },
+      "tiou@0.5": {
+        "precision": 0.029411764705882353,
+        "recall": 0.02857142857142857,
+        "f1": 0.02898550724637681,
+        "tp": 1,
+        "fp": 33,
+        "fn": 34
+      },
+      "midpoint@1.0s": {
+        "precision": 0.08823529411764706,
+        "recall": 0.08571428571428572,
+        "f1": 0.08695652173913045,
+        "tp": 3,
+        "fp": 31,
+        "fn": 32
+      },
+      "start_mae_s": 0.4166666666666714,
+      "end_mae_s": 0.5500000000000019,
+      "per_type": {
+        "pickup": {
+          "precision": 0.03571428571428571,
+          "recall": 0.043478260869565216,
+          "f1": 0.0392156862745098,
+          "tp": 1,
+          "fp": 27,
+          "fn": 22
+        },
+        "putdown": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 6,
+          "fn": 12
+        }
+      },
+      "fp_per_hour": 52.18193398194716,
+      "runtime_per_video_minute": null,
+      "event_count_error_per_clip": 31,
+      "event_count_error_absolute": 1,
+      "confusion": {
+        "pickup": {
+          "pickup": 1,
+          "putdown": 0
+        },
+        "putdown": {
+          "pickup": 1,
+          "putdown": 0
+        }
+      },
+      "confusion_tiou": 0.5,
+      "mAP": {
+        "mAP@0.3": 0.03367918313570487,
+        "mAP@0.5": 0.0009881422924901185,
+        "mAP@0.7": 0.0,
+        "mAP_avg": 0.011555775142731664
+      },
+      "multi_item_recall": null,
+      "multi_item_support": 0
+    }
+  }
+}

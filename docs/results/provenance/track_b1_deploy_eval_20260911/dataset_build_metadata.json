@@ -1,0 +1,85 @@
+{
+  "input_mode": "deployment",
+  "export_dir": "/home/ubuntu/repos/ai_workshop_cv_case/.local/annotations/cvat/2026-09-09/raw",
+  "video_dir": "/home/ubuntu/repos/ai_workshop_cv_case/.local/source_videos",
+  "split_registry": {
+    "file": "/home/ubuntu/repos/ai_workshop_cv_case/configs/track_b1_splits.yaml",
+    "name": "cvat_b1_2026_09_09",
+    "days": {
+      "20260520": "train",
+      "20260521": "train",
+      "20260522": "train",
+      "20260523": "val",
+      "20260526": "test"
+    }
+  },
+  "window": {
+    "window_duration_s": 1.5,
+    "window_stride_s": 0.25,
+    "min_window_duration_s": 1.0,
+    "num_frames": 16,
+    "image_size": [
+      224,
+      224
+    ],
+    "crop_margin": 0.15,
+    "crop_scope": "candidate",
+    "resize_interpolation": "area",
+    "include_shelf_region": false,
+    "weight_high": 1.0,
+    "weight_med": 1.0,
+    "weight_low": 0.5,
+    "min_event_overlap_ratio": 0.0
+  },
+  "preprocessing": {
+    "version": 2,
+    "num_frames": 16,
+    "image_size": [
+      224,
+      224
+    ],
+    "crop_margin": 0.15,
+    "crop_scope": "candidate",
+    "resize_interpolation": "area",
+    "include_shelf_region": false,
+    "frame_sampling": "linspace(int(start*fps), int(end*fps)-1, num_frames)",
+    "normalization": "bgr->rgb, imagenet mean/std"
+  },
+  "shelves_config": "/home/ubuntu/repos/ai_workshop_cv_case/configs/shelves.yaml",
+  "context_pad_s": 3.0,
+  "negative_windows_per_clip": 12,
+  "accepted_only": false,
+  "seed": 42,
+  "n_event_rows": 283,
+  "n_ignore_intervals": 3,
+  "n_clips": 42,
+  "n_candidates": 410,
+  "n_windows": 13169,
+  "label_counts": {
+    "background": 12529,
+    "pickup": 406,
+    "putdown": 234
+  },
+  "coverage": {
+    "labelled": 140,
+    "association_failed": 86,
+    "other_actor_only": 46,
+    "no_window_centre": 6,
+    "no_candidate": 5
+  },
+  "pose_data_dir": ".local/track_b1_data",
+  "tracks_dir": "/home/ubuntu/repos/ai_workshop_cv_case/.local/track_b1_data/pose_tracks",
+  "association_config": {
+    "box_expand": 0.25,
+    "min_wrist_confidence": 0.3,
+    "time_pad_s": 0.25,
+    "min_score": 0.3,
+    "min_margin": 0.15
+  },
+  "association_status": {
+    "matched": 197,
+    "unmatched": 69,
+    "no_pose": 14,
+    "ambiguous": 3
+  }
+}

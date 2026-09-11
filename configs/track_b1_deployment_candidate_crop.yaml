@@ -1,0 +1,16 @@
+# Deployment inputs with the preprocessing annotation-trained checkpoints were trained on
+# (docs/TRACK_B1_INTEGRATION.md §8). Candidates and crop boxes still come only from the
+# pose pipeline; only crop scope and resize interpolation follow the annotation mode, so an
+# annotation-vs-deployment comparison of one checkpoint changes the input source, not the
+# preprocessing. Pass to build_track_b1_dataset.py --input-mode deployment --config <this>.
+window:
+  window_duration_s: 1.5
+  window_stride_s: 0.25
+  num_frames: 16
+  image_size: [224, 224]
+  crop_margin: 0.15
+
+input_modes:
+  deployment:
+    crop_scope: "candidate"
+    resize_interpolation: "area"

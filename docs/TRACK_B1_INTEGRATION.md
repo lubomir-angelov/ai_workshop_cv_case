@@ -256,6 +256,13 @@ Plausibly (unverified) the first pair is after validation threshold tuning and t
 before it. These scores also predate the item-count expansion (§4.1) and are
 annotation-conditioned; do not compare them with deployment-mode or baseline numbers.
 
+### 7.4 Reproduced checkpoints on deployment inputs
+
+`results/TRACK_B1_DEPLOYMENT_EVAL.md`: the reproduced frozen-head and fine-tuned checkpoints,
+unchanged, fall from annotation-conditioned test F1 @0.3 0.361 / 0.529 to 0.101 / 0.078
+end to end on deployment inputs (decoders fixed from annotation validation), and
+deployment-validation calibration does not recover them.
+
 ## 8. Commands
 
 All commands run from the repository root in the project environment. The Makefile
@@ -315,6 +322,10 @@ To evaluate an annotation-trained checkpoint on deployment inputs with the *same
 preprocessing it was trained on, build a deployment dataset with a config whose
 `input_modes.deployment` sets `crop_scope: candidate` and `resize_interpolation: area`;
 otherwise the comparison mixes a change of candidates with a change of crop.
+`configs/track_b1_deployment_candidate_crop.yaml` is that config. Pose candidates are long
+(median ~6 s, up to 112 s), so a candidate-wide union of person boxes is much wider than an
+annotation crop: the interaction box fills a median 2–5 % of it against 59 % in annotation
+crops (`results/TRACK_B1_DEPLOYMENT_EVAL.md`).
 
 ## 9. Remaining issues
 

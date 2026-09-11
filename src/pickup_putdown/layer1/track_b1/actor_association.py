@@ -261,6 +261,69 @@ def candidate_coverage(
     return pd.DataFrame(rows)
 
 
+#: ``event_coverage`` partition, in precedence order: an event takes the first that applies.
+#: Temporal proposal coverage is judged before (and independently of) actor association,
+#: so an association failure is never reported as a proposal miss.
+COVERAGE_PARTITION = (
+    "no_candidate",  # no candidate of any actor overlaps the event interval
+    "no_window_centre",  # candidates overlap, but no window (any actor) is centred inside
+    "association_unresolved",  # proposals exist; event not attributable (unmatched/ambiguous/no_pose)
+    "other_actor_only",  # attributed actor has no overlapping candidate; other actors do
+    "own_no_window_centre",  # attributed actor's candidate overlaps; none of its windows centred inside
+    "own_covered",  # a window of the attributed actor is centred inside the event
+)
+
+
+def event_coverage(
+    events: pd.DataFrame, candidates: pd.DataFrame, windows: pd.DataFrame
+) -> pd.DataFrame:
+    """Per-event proposal/association coverage flags plus one ``COVERAGE_PARTITION`` label.
+
+    ``events`` is in pose identity (``events_in_pose_identity``: ``actor_id`` is the matched
+    pose actor or null, with ``association_status``); ``candidates`` and ``windows`` are the
+    deployment candidates and every inference window over them (any actor, never filtered
+    by labels). The boolean flags overlap freely; ``coverage`` is a partition.
+    """
+    rows: list[dict] = []
+    for _, event in events.iterrows():
+        start, end = event["t_start"], event["t_end"]
+        clip_candidates = candidates[candidates["clip_id"] == event["clip_id"]]
+        overlapping = clip_candidates[
+            (clip_candidates["window_start_s"] < end) & (clip_candidates["window_end_s"] > start)
+        ]
+        clip_windows = windows[windows["clip_id"] == event["clip_id"]]
+        centred = clip_windows[
+            (clip_windows["window_center_s"] >= start) & (clip_windows["window_center_s"] <= end)
+        ]
+        matched = event["association_status"] == "matched"
+        own_overlap = matched and bool((overlapping["actor_id"] == event["actor_id"]).any())
+        own_centre = matched and bool((centred["actor_id"] == event["actor_id"]).any())
+        if overlapping.empty:
+            coverage = "no_candidate"
+        elif centred.empty:
+            coverage = "no_window_centre"
+        elif not matched:
+            coverage = "association_unresolved"
+        elif not own_overlap:
+            coverage = "other_actor_only"
+        elif not own_centre:
+            coverage = "own_no_window_centre"
+        else:
+            coverage = "own_covered"
+        rows.append(
+            {
+                "event_id": event["event_id"],
+                "n_candidates_any_actor": len(overlapping),
+                "n_actors_overlapping": int(overlapping["actor_id"].nunique()),
+                "any_window_centre": not centred.empty,
+                "own_candidate_overlap": own_overlap,
+                "own_window_centre": own_centre,
+                "coverage": coverage,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def window_evidence(
     window_start_s: float,
     window_end_s: float,
@@ -276,9 +339,16 @@ def window_evidence(
     the annotated event (0 means the transfer happened between samples).
     ``event_box_in_crop``: mean fraction of the annotated box area inside the crop
     over the event frames in this window (low means the transfer was cropped out).
+    ``event_box_share_of_crop``: mean fraction of the crop area the (visible) annotated
+    box occupies — the scale at which the interaction reaches the model; a crop can
+    contain the whole box while the box is a speck of it.
     """
     indices = _compute_frame_indices(window_start_s, window_end_s, num_frames, fps)
-    result = {"sampled_frames_in_event": None, "event_box_in_crop": None}
+    result = {
+        "sampled_frames_in_event": None,
+        "event_box_in_crop": None,
+        "event_box_share_of_crop": None,
+    }
     if event is None or cvat_track is None:
         return result
     start_frame, end_frame = event["t_start"] * fps, event["t_end"] * fps
@@ -296,4 +366,6 @@ def window_evidence(
     inter_h = np.clip(np.minimum(b[:, 3], cy2) - np.maximum(b[:, 1], cy1), 0, None)
     area = np.clip((b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1]), 1e-9, None)
     result["event_box_in_crop"] = float(np.mean(inter_w * inter_h / area))
+    crop_area = max((cx2 - cx1) * (cy2 - cy1), 1e-9)
+    result["event_box_share_of_crop"] = float(np.mean(inter_w * inter_h / crop_area))
     return result
