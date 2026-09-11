@@ -37,6 +37,9 @@ import torch
 import torch.nn as nn
 from transformers import VideoMAEConfig, VideoMAEModel
 
+from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file
+
 logger = logging.getLogger(__name__)
 
 
@@ -199,26 +202,78 @@ class VideoMAEClassifier(nn.Module):
         )
 
     def _load_encoder(self, model_name: str) -> VideoMAEModel:
-        """Load pretrained VideoMAE encoder from HuggingFace.
+        """Load the legacy VideoMAE encoder with explicit bias conversion.
 
-        Args:
-            model_name: HuggingFace model identifier.
-
-        Returns:
-            Loaded VideoMAE encoder model.
+        Intended for the MCG-NJU/videomae-base pretraining checkpoint
+        and the installed query/key/value Linear-bias implementation.
         """
-        logger.info(f"Loading VideoMAE encoder from: {model_name}")
+        logger.info("Loading VideoMAE encoder from %s", model_name)
 
-        try:
-            encoder = VideoMAEModel.from_pretrained(model_name)
-            logger.info(
-                f"Encoder loaded: {encoder.config.num_hidden_layers} layers, "
-                f"hidden_size={encoder.config.hidden_size}"
+        config = VideoMAEConfig.from_pretrained(model_name)
+        encoder = VideoMAEModel(config)
+
+        weights_path = hf_hub_download(
+            repo_id=model_name,
+            filename="model.safetensors",
+        )
+        checkpoint = load_file(weights_path, device="cpu")
+
+        # Keep only the encoder; discard the reconstruction decoder.
+        prefix = "videomae."
+        state = {
+            name.removeprefix(prefix): tensor
+            for name, tensor in checkpoint.items()
+            if name.startswith(prefix)
+        }
+        if not state:
+            raise RuntimeError(
+                f"{model_name}: checkpoint contains no {prefix!r} weights"
             )
-            return encoder
-        except Exception as e:
-            logger.error(f"Failed to load encoder: {e}")
-            raise
+
+        converted = 0
+        for index in range(config.num_hidden_layers):
+            base = f"encoder.layer.{index}.attention.attention"
+
+            for old_suffix, new_suffix in (
+                ("q_bias", "query.bias"),
+                ("v_bias", "value.bias"),
+            ):
+                old_key = f"{base}.{old_suffix}"
+                new_key = f"{base}.{new_suffix}"
+
+                if old_key not in state:
+                    raise RuntimeError(
+                        f"Expected legacy checkpoint parameter: {old_key}"
+                    )
+                if new_key in state:
+                    raise RuntimeError(
+                        f"Ambiguous checkpoint: both {old_key} and {new_key}"
+                    )
+
+                state[new_key] = state.pop(old_key)
+                converted += 1
+
+            key_bias = f"{base}.key.bias"
+            if key_bias in state:
+                raise RuntimeError(
+                    f"Unexpected key bias in legacy checkpoint: {key_bias}"
+                )
+            state[key_bias] = torch.zeros_like(state[f"{base}.query.bias"])
+
+        # Raises on missing/unexpected keys or incompatible tensor shapes.
+        encoder.load_state_dict(state, strict=True)
+        encoder.eval()
+
+        logger.info(
+            "Encoder loaded strictly: layers=%d, hidden_size=%d, "
+            "converted_biases=%d, zero_key_biases=%d",
+            config.num_hidden_layers,
+            config.hidden_size,
+            converted,
+            config.num_hidden_layers,
+        )
+        
+        return encoder
 
     def _configure_freezing(
         self,
