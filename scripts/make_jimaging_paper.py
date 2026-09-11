@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Build the Journal of Imaging manuscript from MDPI's official template.
+"""Build the Journal of Imaging manuscript from MDPI's official template (revised).
 
     python scripts/make_jimaging_paper.py
 
-Fills the template in place: placeholder body content is removed, ours is written
-back using the template's own MDPI_* named styles, so page setup, headers, footers,
-fonts and spacing are whatever MDPI shipped.
+Fills the template in place with the template's own MDPI_* named styles. Every number
+is read from the results registry (.local/paper/revision/registry.csv) and the
+leave-one-day-out and sensitivity tables, so one configuration produces one set of
+figures everywhere in the manuscript.
 
-The template is distributed as .dot with a template content type that python-docx
-refuses; it is rewritten to a document content type on load. Nothing else is altered.
+The template ships as .dot with a template content type python-docx refuses; it is
+rewritten to a document content type on load. Nothing else is altered.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import shutil
 import zipfile
 from pathlib import Path
 
+import pandas as pd
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt
@@ -26,18 +26,15 @@ from docx.shared import Inches, Pt
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REPO_URL = "https://github.com/lubomir-angelov/ai_workshop_cv_case"
 BRANCH = "feature/cvat_annotation"
+RELEASE_TAG = "v1.0-jimaging"
 
 TEXT = "MDPI_3.1_text"
-TEXT_NI = "MDPI_3.2_text_no_indent"
-H1, H2, H3 = "MDPI_2.1_heading1", "MDPI_2.2_heading2", "MDPI_2.3_heading3"
+H1, H2 = "MDPI_2.1_heading1", "MDPI_2.2_heading2"
 BACK = "MDPI_6.2_back_matter"
 REFS = "MDPI_8.1_references"
-FIGCAP = "MDPI_5.1_figure_caption"
-TABCAP = "MDPI_4.1_table_caption"
 
 
 def open_template(source: Path, working: Path) -> Document:
-    """Copy the .dot to .docx and relax its content type so python-docx will open it."""
     working.parent.mkdir(parents=True, exist_ok=True)
     tpl, doc = b"wordprocessingml.template.main+xml", b"wordprocessingml.document.main+xml"
     with zipfile.ZipFile(source) as zin, zipfile.ZipFile(working, "w", zipfile.ZIP_DEFLATED) as zout:
@@ -50,61 +47,53 @@ def open_template(source: Path, working: Path) -> Document:
 
 
 def clear_body(document: Document) -> None:
-    """Drop template placeholder content, keeping section properties (margins, headers)."""
     body = document.element.body
     for child in list(body):
         if not child.tag.endswith("}sectPr"):
             body.remove(child)
 
 
-def para(document: Document, text: str, style: str = TEXT):
-    p = document.add_paragraph(style=style)
+def para(d, text, style=TEXT):
+    p = d.add_paragraph(style=style)
     p.add_run(text)
     return p
 
 
-def rich(document: Document, parts, style: str = TEXT):
-    """Paragraph with mixed formatting: str, or (text, 'b'|'i') pairs."""
-    p = document.add_paragraph(style=style)
+def rich(d, parts, style=TEXT):
+    p = d.add_paragraph(style=style)
     for part in parts:
         text, mark = part if isinstance(part, tuple) else (part, "")
         run = p.add_run(text)
-        run.bold = "b" in mark
-        run.italic = "i" in mark
+        run.bold, run.italic = "b" in mark, "i" in mark
     return p
 
 
-def figure(document: Document, image: Path, caption: str, width_in: float = 6.1) -> None:
+def caption(d, style, text):
+    cap = d.add_paragraph(style=style)
+    head, _, rest = text.partition(". ")
+    cap.add_run(head + ". ").bold = True
+    cap.add_run(rest)
+
+
+def figure(d, image: Path, text: str, width_in=6.1):
     if not image.exists():
         return
-    p = document.add_paragraph(style="MDPI_5.2_figure")
+    p = d.add_paragraph(style="MDPI_5.2_figure")
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.add_run().add_picture(str(image), width=Inches(width_in))
-    cap = document.add_paragraph(style=FIGCAP)
-    head, _, rest = caption.partition(". ")
-    cap.add_run(head + ". ").bold = True
-    cap.add_run(rest)
+    caption(d, "MDPI_5.1_figure_caption", text)
 
 
-def table(document: Document, rows: list[list[str]], caption: str) -> None:
-    cap = document.add_paragraph(style=TABCAP)
-    head, _, rest = caption.partition(". ")
-    cap.add_run(head + ". ").bold = True
-    cap.add_run(rest)
-
-    t = document.add_table(rows=len(rows), cols=len(rows[0]))
-    for style_name in ("MDPI_4.1_three_line_table", "MDPI_table", "Table Grid"):
-        try:
-            t.style = style_name
-            break
-        except KeyError:
-            continue
+def table(d, rows, text):
+    caption(d, "MDPI_4.1_table_caption", text)
+    t = d.add_table(rows=len(rows), cols=len(rows[0]))
+    t.style = "MDPI_4.1_three_line_table"
     for r, row in enumerate(rows):
         for c, value in enumerate(row):
             cell = t.cell(r, c)
             cell.text = ""
             p = cell.paragraphs[0]
-            p.style = document.styles["MDPI_4.2_table_body"]
+            p.style = d.styles["MDPI_4.2_table_body"]
             if c:
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             run = p.add_run(str(value))
@@ -112,34 +101,45 @@ def table(document: Document, rows: list[list[str]], caption: str) -> None:
             run.font.size = Pt(8)
 
 
-def metrics() -> dict:
-    def read(path):
-        p = REPO_ROOT / path
-        return json.loads(p.read_text()) if p.exists() else {}
-    return {
-        "ft_val": read(".local/track_b1_finetune/predictions/metrics_val.json"),
-        "ft_test": read(".local/track_b1_finetune/predictions/metrics_test.json"),
-        "fz_val": read(".local/track_b1_run_w15/predictions/metrics_val.json"),
-        "fz_test": read(".local/track_b1_run_w15/predictions/metrics_test.json"),
-    }
+# ---------------------------------------------------------------------------
+# Numbers: one registry, one row per configuration
+# ---------------------------------------------------------------------------
 
 
-def num(node: dict, *path, fmt="{:.3f}", default="—"):
-    for step in path:
-        node = node.get(step) if isinstance(node, dict) else None
-    return fmt.format(node) if isinstance(node, (int, float)) else default
+def load_numbers(revision: Path) -> dict:
+    reg = pd.read_csv(revision / "registry.csv").set_index("run_id")
+    lodo = pd.read_csv(revision / "lodo_frozen.csv")
+    sens = pd.read_csv(revision / "putdown_sensitivity.csv")
+    dur = pd.read_csv(revision / "event_durations.csv").set_index("stat")["value"]
+    return {"reg": reg, "lodo": lodo, "sens": sens, "dur": dur}
 
 
-def build(template: Path, output: Path, figures: Path) -> None:
-    m = metrics()
+def r(reg, model, split, boundary="window_centers", thr="tuned"):
+    return reg.loc[f"{model}|{split}|{boundary}|{thr}"]
+
+
+def f3(x): return f"{x:.3f}"
+def f2(x): return f"{x:.2f}"
+def f1(x): return f"{x:.1f}"
+
+
+def build(template: Path, output: Path, figures: Path, revision: Path) -> None:
+    n = load_numbers(revision)
+    reg, lodo, sens, dur = n["reg"], n["lodo"], n["sens"], n["dur"]
+    FZV, FZT = r(reg, "frozen_probe", "val"), r(reg, "frozen_probe", "test")
+    FTV, FTT = r(reg, "finetuned_2blocks", "val"), r(reg, "finetuned_2blocks", "test")
+    FZV_SPAN, FTV_SPAN = r(reg, "frozen_probe", "val", "window_span"), r(reg, "finetuned_2blocks", "val", "window_span")
+    lodo_m3, lodo_s3 = lodo["f1@0.3"].mean(), lodo["f1@0.3"].std()
+    lodo_mp, lodo_sp = lodo["putdown_f1@0.5"].mean(), lodo["putdown_f1@0.5"].std()
+
     d = open_template(template, output.with_name("_template_working.docx"))
     clear_body(d)
 
-    # ---------------- Front matter ----------------
+    # ================= Front matter =================
     para(d, "Article", "MDPI_1.1_article_type")
-    para(d, "Actor-Conditioned Video Transformers for Pickup and Putdown Detection in "
-            "Retail Video: Decoder Geometry, Crop Conditioning and Cross-Day "
-            "Generalisation", "MDPI_1.2_title")
+    para(d, "Pickup and Putdown Detection in Retail Video Under Annotation-Derived "
+            "Conditioning: Decoder Geometry, Crop Conditioning and Cross-Day Variation of an "
+            "Actor-Conditioned Video Transformer", "MDPI_1.2_title")
     rich(d, ["Firstname Lastname ", ("1", "i"), ", Firstname Lastname ", ("2", "i"),
              " and Firstname Lastname ", ("1,*", "i")], "MDPI_1.3_authornames")
     para(d, "1\tAffiliation 1; e-mail@e-mail.com", "MDPI_1.6_affiliation")
@@ -147,582 +147,601 @@ def build(template: Path, output: Path, figures: Path) -> None:
     para(d, "*\tCorrespondence: e-mail@e-mail.com", "MDPI_1.6_affiliation")
 
     rich(d, [("Abstract: ", "b"),
-             "Distinguishing an item being removed from a shelf from one being returned to it is a "
-             "temporal action detection problem in which the two classes are near time-reverses of "
-             "one another, so the discriminating evidence is the direction of transfer rather than "
-             "its presence. We train an actor-conditioned VideoMAE window classifier on 42 "
-             "human-annotated 4K store recordings comprising 259 events across five recording days, "
-             "and evaluate it with a class-aware temporal intersection-over-union protocol. Two "
-             "results concern the pipeline rather than the model. Constructing a predicted "
-             "interval as the span of contributing sliding windows imposes a ceiling on "
-             "achievable temporal IoU equal to the ratio of event to window duration; a "
-             "centre-derived interval raised validation F1 at tIoU 0.3 from 0.350 to 0.647 "
-             "without retraining. Where spatial conditioning exists only for positives, "
-             "background windows fall back to a full-frame crop and the classes become separable "
-             "on crop geometry alone. The substantive result is negative: fine-tuning the last two "
-             "transformer blocks raised validation event F1 to 0.783, but on a held-out recording "
-             "day mean predicted putdown probability on true putdown windows fell to 0.062 while "
-             "pickup rose to 0.588, and no threshold recovers the class. Detection and localisation "
-             "transfer across days; direction does not."],
+             "Distinguishing an item removed from a shelf from one returned to it is a temporal "
+             "action detection problem whose two classes are near time-reverses, so the evidence "
+             "is the direction of transfer. We train an actor-conditioned "
+             "VideoMAE window classifier on 42 human-annotated 4K store recordings (259 events, five "
+             "recording days). We evaluate classification and temporal refinement within "
+             "annotation-derived spatial and temporal candidates; the results therefore describe "
+             "performance under oracle conditioning, not end-to-end detection in continuous video. "
+             "Two results concern the pipeline. Taking a predicted interval as the span of "
+             "contributing windows bounds per-event temporal IoU by the ratio of event to window "
+             "duration; on identical window scores and thresholds, centre-derived intervals raised "
+             f"validation F1 at tIoU 0.5 from {f3(FTV_SPAN['f1@0.5'])} to {f3(FTV['f1@0.5'])}. "
+             "Where spatial conditioning exists only for positives, background windows fall back to "
+             "a full-frame crop and separate on geometry alone. Partial fine-tuning raised "
+             f"validation event F1 to {f3(FTV['f1@0.3'])}, but at the validation-selected operating "
+             "point achieved zero putdown F1 on the held-out day, with scores on true putdowns "
+             "shifted towards pickup. Leave-one-day-out evaluation of the frozen probe gives mean "
+             f"F1 {f3(lodo_m3)} ± {f3(lodo_s3)} and putdown F1 {f3(lodo_mp)} ± {f3(lodo_sp)} over "
+             "five days: the single-split validation figure was optimistic and the directional "
+             "weakness recurs across days."],
          "MDPI_1.7_abstract")
     rich(d, [("Keywords: ", "b"),
               "temporal action detection; video transformers; VideoMAE; retail computer vision; "
-              "domain shift; annotation methodology; evaluation protocol; self-checkout"],
+              "shortcut learning; evaluation protocol; leave-one-day-out; annotation methodology"],
          "MDPI_1.8_keywords")
 
-    # ---------------- 1. Introduction ----------------
+    # ================= 1. Introduction =================
     para(d, "1. Introduction", H1)
-    para(d, "Automated checkout and shrinkage analytics both depend on a single perceptual "
-            "distinction: whether an item moved from the shelf into a shopper's possession, or in "
-            "the opposite direction. A system that reports only that an interaction occurred is not "
-            "useful for either application. Charging a customer for an item they inspected and "
-            "returned is a worse outcome than failing to detect the event, because the error is "
-            "visible to the customer, adversarial in character, and costly to dispute.")
-    para(d, "This asymmetry makes the task an awkward fit for the standard temporal action "
-            "detection formulation. Established benchmarks such as THUMOS14 [1] and ActivityNet [2] "
-            "contain action classes that differ in object, scene and appearance, so a model can "
-            "succeed on largely static cues. The methods that lead those benchmarks reflect that "
-            "assumption: proposal-based detectors such as BMN [3] and single-stage transformer "
-            "detectors such as ActionFormer [4] localise segments whose class identity is settled "
-            "principally by segment content. Pickup and putdown share every such cue. They occur at "
-            "the same shelf, involve the same hands and merchandise, and produce near-identical "
-            "spatial evidence. What separates them is the temporal ordering of a hand-state change "
-            "relative to a shelf-state change. The Something-Something dataset [5] was constructed "
-            "specifically to expose this weakness in appearance-driven models, and retail "
-            "pickup/putdown is a real-world instance of the same difficulty.")
+    para(d, "Automated checkout and shrinkage analytics both depend on one perceptual distinction: "
+            "whether an item moved from the shelf into a shopper's possession or in the opposite "
+            "direction. A system that reports only that an interaction occurred is of limited use to "
+            "either. Charging a customer for an item they inspected and returned is a worse outcome "
+            "than missing the event, because the error is visible to the customer and costly to "
+            "dispute.")
+    para(d, "This asymmetry makes the task an awkward fit for the standard temporal action detection "
+            "formulation. Established benchmarks such as THUMOS14 [1] and ActivityNet [2] contain "
+            "action classes that differ in object, scene and appearance, and their leading methods, "
+            "whether proposal-based such as BMN [3] or single-stage such as ActionFormer [4], are "
+            "developed against that structure. Pickup and putdown share the shelf, the hands and the "
+            "merchandise; the evidence that separates them is the temporal ordering of a hand-state "
+            "change relative to a shelf-state change. The Something-Something dataset [5] was built "
+            "to expose exactly this weakness in appearance-driven models, and the arrow-of-time "
+            "literature [10] shows that temporal direction is a learnable but non-trivial signal. "
+            "Retail interaction has its own benchmark in the MERL Shopping dataset [11], whose "
+            "classes (reach to shelf, retract from shelf, hand in shelf, inspect product) are "
+            "adjacent to ours but do not resolve the direction of transfer. The broader hazard that "
+            "a model fits a decision rule which performs on the benchmark and fails under shift is "
+            "well characterised as shortcut learning [12].")
     para(d, "Video transformers pre-trained by masked autoencoding [6], building on the Vision "
-            "Transformer architecture [7] and large-scale action corpora [8], are now the default "
-            "backbone for such tasks. Data efficiency on small downstream datasets is an explicit "
-            "claim of VideoMAE [6], which reports competitive results on corpora of three to four "
-            "thousand clips. Whether that efficiency extends to a distinction defined by temporal "
-            "direction, under the domain shift induced by a different recording day in the same "
-            "store, is not something existing benchmarks measure.")
-    para(d, "We report a case study addressing that question. The contribution is deliberately "
-            "narrow and empirical, and consists of three parts. First, a data path from "
-            "source-video box annotation to actor-conditioned window training that requires no "
-            "pose-estimation stage: annotators draw a tracked box on each interaction in CVAT [9], "
-            "and that single artefact supplies both the temporal extent of the event and the "
-            "spatial region on which the classifier is conditioned. Second, two failure modes in "
-            "the machinery surrounding the model which are straightforward to introduce, invisible "
-            "in aggregate accuracy, and large enough to dominate reported performance; one concerns "
-            "the construction of predicted intervals from window scores, the other the behaviour of "
-            "the crop when no annotation box is available. Third, a quantified negative result on "
-            "the cross-day generalisation of the direction distinction, accompanied by the "
-            "diagnostic evidence required to separate it from a threshold-calibration failure.")
-    para(d, "The second of these is the contribution we expect to transfer beyond this dataset. "
-            "Both failure modes are properties of pipeline construction rather than of the "
-            "architecture, both proved more consequential than any modelling change we made, and "
-            "neither is visible in a single headline metric.")
+            "Transformer [7] and large action corpora [8], are now the default backbone. Data "
+            "efficiency on small downstream sets is an explicit claim of VideoMAE [6]. Whether that "
+            "efficiency extends to a distinction defined by temporal direction, under the shift "
+            "between recording days in one store, is not something existing benchmarks measure.")
+    para(d, "We report a methodological case study on that question. Its scope is bounded and "
+            "should be read as such: candidates and crop regions are derived from the ground-truth "
+            "annotation boxes and are used at inference as well as in training, so every figure "
+            "reported here is an estimate under oracle conditioning, not the performance of an "
+            "end-to-end detector on continuous video. Within that scope the contribution has three "
+            "parts. First, a data path from source-video box annotation to actor-conditioned window "
+            "training that needs no pose-estimation stage: annotators draw a tracked box on each "
+            "interaction in CVAT [9], and that artefact supplies both the temporal extent and the "
+            "spatial conditioning region. Second, two failure modes in the machinery around the "
+            "model that are easy to introduce and invisible in aggregate accuracy: the construction "
+            "of predicted intervals from window scores, and the behaviour of the crop when no box "
+            "exists. Third, a characterisation of how the pickup/putdown distinction varies across "
+            "recording days, evaluated both on a single held-out day and by leave-one-day-out over "
+            "all five, with the diagnostic evidence needed to separate a classification failure "
+            "from a threshold-calibration failure.")
 
-    # ---------------- 2. Materials and Methods ----------------
+    # ================= 2. Materials and Methods =================
     para(d, "2. Materials and Methods", H1)
-    para(d, "This section describes each stage of the pipeline in the order it is executed. The "
-            "complete implementation, configuration files and evaluation code are openly available "
-            f"(Section 2.9). Figure 1 of the software documentation and the command "
-            f"make track-b1-all reproduce the entire sequence from an existing annotation export.")
+    para(d, "This section describes each stage in execution order. The implementation, "
+            "configuration, results registry and evaluation code are openly available "
+            "(Section 2.10), and the command make track-b1-all reproduces the sequence from an "
+            "existing annotation export.")
 
-    para(d, "2.1. Video Corpus and Acquisition", H2)
-    para(d, "The corpus comprises 42 recordings from a single fixed overhead camera in one retail "
-            "store. Each recording is between two and five minutes long, at a spatial resolution of "
-            "3840 × 2160 pixels and a frame rate of exactly 20.0 frames per second, and the set "
-            "spans five distinct recording days. Faces and other identifying features were "
-            "anonymised at source before the footage was made available to the annotation team, and "
-            "no personally identifying information was accessible at any subsequent stage.")
-    para(d, "Table 1 summarises the corpus and the split assignment described in Section 2.8.")
+    para(d, "2.1. Video Corpus", H2)
+    para(d, "The corpus comprises 42 recordings from a single fixed overhead camera in one store, "
+            "each between two and five minutes long, at 3840 × 2160 pixels and exactly 20.0 frames "
+            "per second, spanning five recording days. The footage was anonymised by the data "
+            "provider before release to the research team. Table 1 summarises the corpus and the "
+            "split assignment of Section 2.9.")
     table(d, [
-        ["Split", "Recording days", "Clips", "Pickup", "Putdown", "Windows"],
-        ["Train", "3 (20–22 May)", "23", "127", "65", "5192"],
-        ["Validation", "1 (23 May)", "7", "20", "12", "973"],
-        ["Test", "1 (26 May)", "12", "23", "12", "1551"],
-        ["Total", "5", "42", "170", "89", "7716"],
-    ], "Table 1. Composition of the annotated corpus and assignment of recordings to splits. "
-       "Splits are assigned at the level of recording day, never at the level of individual clip.")
+        ["Split", "Recording day(s)", "Clips", "Pickup", "Putdown", "Events", "Windows", "Unique video (h)"],
+        ["Train", "2026-05-20, -21, -22", "23", "127", "65", "60 / 73 / 59", "5192", "1.35"],
+        ["Validation", "2026-05-23", "7", "20", "12", "32", "973", f"{FZV['unique_video_hours']:.2f}"],
+        ["Test", "2026-05-26", "12", "23", "12", "35", "1551", f"{FZT['unique_video_hours']:.2f}"],
+        ["Total", "5 days", "42", "170", "89", "259", "7716", "2.31"],
+    ], "Table 1. Corpus composition and split assignment. Events per training day are given "
+       "individually. Unique video time is the denominator used for false positives per hour.")
 
     para(d, "2.2. Annotation Protocol", H2)
-    para(d, "Annotation was performed in CVAT [9] directly on the source video rather than on "
-            "pre-extracted candidate windows. Each annotated interval is a CVAT track carrying an "
-            "axis-aligned bounding box on every frame it spans, labelled pickup, putdown or ignore. "
-            "Per-label attributes record annotator confidence (high, medium or low), a hard-case "
-            "flag, an item count, and a review status. A track interrupted by an outside marker and "
-            "subsequently resumed is treated as two distinct events rather than a single interval "
-            "spanning the intervening gap.")
-    para(d, "The resulting ground truth contains 259 events, of which 170 are pickup and 89 are "
-            "putdown, together with three ignore intervals marking spans in which transfer evidence "
-            "was unavailable. The median event duration is 0.90 s and the median annotation box "
-            "measures 214 × 249 pixels within the 3840 × 2160 frame. Seven of the 42 recordings "
-            "were completed by an annotator with zero events; these are verified negatives and are "
-            "retained, since a confirmed absence of interaction is as informative for training as a "
-            "confirmed presence.")
-    para(d, "The design choice to annotate on source video rather than on candidate windows has two "
-            "consequences that shape the remainder of the method. It removes any dependence on a "
-            "pose-estimation stage, because the annotation box itself identifies the region of "
-            "interest; and it makes the annotation the sole source of spatial conditioning, which "
-            "introduces the limitation discussed in Section 4.3.")
+    para(d, "Annotation was performed in CVAT [9] on the source video rather than on pre-extracted "
+            "candidate windows, by a single annotator. Each annotated interval is a CVAT track "
+            "carrying an axis-aligned box on every frame it spans, labelled pickup, putdown or "
+            "ignore, with attributes for confidence (high, medium, low), a hard-case flag, item count "
+            "and review status. The annotation guideline defines a pickup as beginning when the hand "
+            "makes contact with the item on the shelf and ending when the item clears the shelf "
+            "region, and a putdown as the reverse; the box is drawn to enclose the hand and item "
+            "through the transfer. A track interrupted by an outside marker and later resumed is "
+            "treated as two events.")
+    para(d, "The export contains 261 CVAT tracks: 258 labelled pickup or putdown and 3 labelled "
+            "ignore. One event track is interrupted and resumed, yielding 259 events, of which 170 "
+            "are pickup and 89 putdown; the three ignore tracks yield three ignore intervals. "
+            "Confidence is high for 201 events, medium for 40 and low for 18; 52 are flagged as hard "
+            "cases; 13 remained in draft review status and are included. The median event lasts "
+            "0.90 s (interquartile range 0.60–1.40 s) and the median box measures 214 × 249 pixels. "
+            "Seven recordings were completed with zero tracks; these are verified negatives and are "
+            "retained. No independent re-annotation of a subset was performed, so inter-annotator "
+            "agreement on class and boundary is not available and is noted as a limitation.")
 
-    para(d, "2.3. Step 1: Recovery of a Canonical Representation", H2)
+    para(d, "2.3. Step 1: Canonical Representation and Timebase", H2)
     para(d, "CVAT stores annotations as frame indices, so every derived timestamp depends on the "
-            "assumed frame rate. Estimating that rate from the recording window encoded in each "
-            "filename yields approximately 20.04 fps, which differs from the true rate by "
-            "approximately 0.2%. Accumulated over a three-minute recording this produces a drift of "
-            "roughly 0.35 s, which exceeds the median event duration. We therefore probe the exact "
-            "average frame rate directly from each video file and record the provenance of the "
-            "value, so that an estimated rate is never mistaken for a measured one. All 42 "
-            "recordings are exactly 20.0 fps.")
-    para(d, "Each archive is parsed into four canonical tables: events, with type, start and end "
-            "times, confidence and hard-case flag; ignore intervals; clip metadata including frame "
-            "rate, duration and split assignment; and per-frame actor tracks giving the annotation "
-            "box at every frame. The actor-track table adopts the column layout of a pose-track "
-            "table, which allows the downstream dataset to consume it without modification.")
+            "assumed frame rate. The rate implied by the recording window in each filename is "
+            "approximately 20.04 fps, which differs from the true rate by about 0.2%; over a "
+            "three-minute recording that accumulates to roughly 0.35 s, about 39% of the median "
+            "event duration. The exact average frame rate is therefore probed from each file and its "
+            "provenance recorded. All 42 recordings are exactly 20.0 fps.")
+    para(d, "Each archive is parsed into four tables: events; ignore intervals; clip metadata "
+            "including frame rate, duration, recording day and split; and per-frame actor tracks. "
+            "The actor-track table uses the column layout of a pose-track table so the downstream "
+            "dataset consumes it unchanged.")
 
     para(d, "2.4. Step 2: Actor-Conditioned Candidates and Windows", H2)
-    para(d, "Each CVAT track is treated as one actor stream. Because tracks are drawn per "
-            "interaction rather than per person, two temporally overlapping tracks within a "
-            "recording yield two independent actor streams; the corpus contains 273 such "
-            "overlapping pairs. Window labels are assigned per actor, using only those events "
-            "belonging to that actor's stream. Assigning labels at the level of the recording, "
-            "which is the more obvious implementation, associates one actor's pickup with a window "
-            "cropped around a different actor and introduces label noise directly into training.")
-    para(d, "A candidate is the padded temporal extent of one actor track. Sliding windows of fixed "
-            "duration are generated across each candidate at fixed stride, and each window is "
-            "labelled according to what occupies its centre: the event class if the centre falls "
-            "within an event interval belonging to that actor, and background otherwise. Windows "
-            "whose centre falls within an ignore interval are discarded. Sample weights follow "
-            "annotator confidence, with low-confidence events down-weighted by a factor of two.")
+    para(d, "Each CVAT track is one actor stream. Tracks are drawn per interaction rather than per "
+            "person, so two temporally overlapping tracks in a recording yield two independent "
+            "streams; the corpus contains 273 such overlapping pairs. Window labels are assigned per "
+            "actor from that actor's events only. Assigning at the level of the recording, the more "
+            "obvious implementation, stamps one actor's pickup onto a window cropped around another.")
+    para(d, "A candidate is the padded temporal extent of one actor track. Windows of 1.5 s at a "
+            "0.25 s stride are generated across each candidate and labelled by what occupies the "
+            "centre: the event class if the centre falls inside an event of that actor, background "
+            "otherwise. Windows centred inside an ignore interval are discarded. Low-confidence events "
+            "are down-weighted by a factor of two.")
 
     para(d, "2.5. Step 3: Crop Conditioning and the Padding Requirement", H2)
-    para(d, "The annotation box defines the crop. For a given candidate, the crop region is the "
-            "union of that actor's boxes across the candidate, expanded by a margin of 15% and "
-            "clamped to the frame boundary, then resized to 224 × 224 pixels.")
-    para(d, "Annotation boxes exist only while an event is in progress. A background window drawn "
-            "from outside any event therefore finds no box. The natural implementation fallback, "
-            "cropping to the full frame, is damaging in a manner that does not appear in the "
-            "training loss: every positive example becomes a tight crop around a pair of hands and "
-            "every negative a wide-angle 4K view, so the classes become separable on crop geometry "
-            "alone and a model may attain high accuracy without attending to the action at all.")
-    para(d, "We remove this shortcut by extending each actor track by ±3 s before and after the "
-            "annotated interval, repeating the boundary box across the extension. Background "
-            "windows drawn from this padding are cropped identically to the positive windows "
-            "originating from the same candidate, so that only the motion contained within the "
-            "region distinguishes them. The padding interval additionally supplies the hardest "
-            "available negatives, since it contains the approach and withdrawal that immediately "
-            "surround a genuine interaction.")
-    para(d, "For the seven verified-negative recordings no annotation box exists anywhere. Twelve "
-            "candidates per recording are synthesised at randomly sampled positions, each "
-            "conditioned on a box drawn from the pool of real annotation boxes, so that the "
-            "crop-geometry distribution of these negatives matches that of the positive class. The "
-            "borrowed box does not correspond to any person's actual location in that recording; "
-            "these windows are consequently valid negatives for the question the classifier is "
-            "asked, namely whether a transfer is occurring within the crop, but not for the "
-            "question of whether a person is present.")
-    para(d, "The crop region is held constant across all windows within a candidate. Besides "
-            "enabling the frame cache described in Section 2.6, this is the preferable conditioning "
-            "choice: a crop that varied per window would expand and contract with the actor's "
-            "motion, and that variation is correlated with event timing.")
+    para(d, "The annotation box defines the crop: the union of the actor's boxes over the candidate, "
+            "expanded by 15% and clamped to the frame, resized to 224 × 224. Boxes exist only while an "
+            "event is in progress, so a background window drawn from outside any event finds no box. "
+            "The natural fallback, cropping to the full frame, makes every positive a tight crop "
+            "around a pair of hands and every negative a wide 4K view; the classes become separable "
+            "on crop geometry and a model may attain high accuracy without attending to the action. "
+            "We regard this as an instance of shortcut learning [12].")
+    para(d, "Each actor track is extended ±3 s with its boundary box held, so background windows from "
+            "the padding are cropped identically to positives from the same candidate. For the seven "
+            "verified-negative recordings, twelve candidates per recording are placed at seeded random "
+            "positions (seed 42), each conditioned on a box sampled from the pool of all annotated "
+            "boxes in the corpus. Two consequences are disclosed rather than assumed away. The box pool "
+            "is drawn from the whole corpus rather than the training split alone, which is a mild "
+            "information leak in box geometry and should be restricted to the training pool in future "
+            "work. And where two actors overlap in time, a padded background window of one actor may "
+            "contain the other actor's event within its crop; we have not counted these cases, so the "
+            "padding is not guaranteed to yield clean negatives. The crop is fixed per candidate rather "
+            "than per window, since a crop that varied with the actor's motion would correlate with "
+            "event timing.")
+    para(d, "We have not quantified the size of the crop shortcut with a controlled comparison against "
+            "the full-frame fallback, nor with a geometry-only classifier. Both are listed in "
+            "Section 4.4.")
 
-    para(d, "2.6. Step 4: Frame Caching", H2)
-    para(d, "The source recordings are 4K H.264. Decoding a training window by seeking to each of "
-            "its 16 constituent frames is prohibitively slow, because every seek decodes forward "
-            "from the preceding keyframe at full resolution. Measured on one recording, 16 seeking "
-            "reads required 20.6 s whereas 48 sequential reads required 0.4 s, a per-frame "
-            "difference of approximately two orders of magnitude. At roughly 27 s per window, a "
-            "single training epoch over 5192 windows would require approximately seventeen hours.")
-    para(d, "Each candidate is therefore decoded exactly once, sequentially, cropped to its "
-            "actor-conditioned region, resized and stored as an unsigned 8-bit array; windows are "
-            "subsequently served by indexing into memory-mapped arrays. The cache occupies 7.2 GB "
-            "and is constructed in approximately twenty minutes.")
-    para(d, "A second optimisation applies while the encoder is frozen. In that regime the backbone "
-            "contributes 86.2 M parameters that are recomputed every epoch in order to train 3843, "
-            "and its output is invariant across epochs. Computing the 768-dimensional embeddings "
-            "once for the full manifest reduces an epoch from approximately nine minutes to under "
-            "one second, which is what makes an exhaustive threshold search and genuine early "
-            "stopping affordable. This optimisation is valid only while the backbone is frozen.")
+    para(d, "2.6. Step 4: Frame and Embedding Caches", H2)
+    para(d, "The source recordings are 4K H.264. Decoding a window by seeking to each of its 16 "
+            "frames is prohibitive because each seek decodes forward from the preceding keyframe at "
+            "full resolution. Measured on one recording, 16 seeking reads required 20.6 s while 48 "
+            "sequential reads required 0.4 s. At approximately 27 s per window, one epoch over the "
+            "2314 windows of the 2.5 s configuration would take about 17 h, and over the 5192 windows "
+            "of the 1.5 s configuration about 39 h. Each candidate is therefore decoded once, "
+            "sequentially, cropped, resized and stored as an 8-bit array (7.2 GB, about twenty "
+            "minutes), and windows are served by indexing memory-mapped arrays.")
+    para(d, "While the encoder is frozen its output is invariant across epochs. Computing the "
+            "768-dimensional embedding once for all 7716 windows reduces an epoch from about nine "
+            "minutes to under one second. Preprocessing is deterministic and the encoder is run in "
+            "evaluation mode with no stochastic layers active, which is the condition under which the "
+            "cache is valid.")
 
-    para(d, "2.7. Step 5: Model and Training Regimes", H2)
-    para(d, "We use VideoMAE-Base [6] pre-trained on Kinetics-400 [8], with a classification head "
-            "consisting of layer normalisation, dropout and a linear projection to three classes "
-            "(background, pickup, putdown). Each window is represented by 16 frames sampled "
-            "uniformly in chronological order and normalised with ImageNet statistics; encoder "
-            "outputs are mean-pooled over the sequence dimension before the head.")
-    para(d, "Two regimes are compared. In the frozen-probe regime the backbone is entirely frozen "
-            "and only the head is trained. In the partial fine-tuning regime the final two "
-            "transformer blocks are unfrozen alongside the head, which requires the full pixel "
-            "path. Two configuration details in the second regime proved necessary rather than "
-            "optional. Discriminative learning rates are required: the head trains at 1 × 10⁻³ and "
-            "the unfrozen backbone at 5 × 10⁻⁵, and a single rate applied to both fails in either "
-            "direction. In an early run at a uniform 5 × 10⁻⁵ the randomly initialised head was "
-            "still predicting background exclusively after two epochs, an outcome we initially "
-            "misread as evidence that unfreezing does not help. The head is additionally "
-            "warm-started from the trained frozen probe, so that the comparison measures the "
-            "contribution of unfreezing rather than the rate at which a head can be trained from "
-            "random initialisation.")
-    para(d, "Both regimes use inverse-frequency class weights, cosine learning-rate decay with "
-            "warmup, and checkpoint selection on validation macro F1.")
-    para(d, "Before any full training run we require two verification gates to pass. The first "
-            "renders the frames produced by the data loader as index-stamped grids, so that "
-            "temporal ordering and crop correctness are verified visually. The second is a "
-            "tiny-overfit test on a class-balanced subset; class balance is material, because "
-            "drawing the leading rows of the manifest yields samples from a single candidate and "
-            "usually a single class, which a model can memorise by collapsing to a constant "
-            "prediction, allowing the gate to pass without evidence of a functioning pipeline.")
+    para(d, "2.7. Step 5: Model and Training", H2)
+    para(d, "We use VideoMAE-Base [6] pre-trained on Kinetics-400 [8] (Hugging Face checkpoint "
+            "MCG-NJU/videomae-base), with a head of layer normalisation, dropout and a linear "
+            "projection to three classes. Each window is 16 frames sampled uniformly in chronological "
+            "order, normalised with ImageNet statistics; encoder outputs are mean-pooled over the "
+            "token sequence. No data augmentation is applied.")
+    para(d, "Two regimes are compared. Frozen probe: the encoder is frozen and only the head trains on "
+            "cached embeddings, with AdamW, learning rate 1 × 10⁻³, weight decay 1 × 10⁻², dropout 0.2, "
+            "batch size 64, cosine decay, up to 300 epochs with early stopping at patience 40, seed 42. "
+            "Partial fine-tuning: the final two transformer blocks are unfrozen with the head, through "
+            "the full pixel path, with AdamW, weight decay 1 × 10⁻², dropout 0.1, batch size 8, two "
+            "warmup epochs then cosine decay, five epochs, seed 42. The head trains at 1 × 10⁻³ and "
+            "the unfrozen blocks at 5 × 10⁻⁵, and the head is warm-started from the frozen probe. Both "
+            "regimes use inverse-frequency class weights and select the checkpoint on validation "
+            "window-level macro F1.")
+    para(d, "We note as an observation, not a controlled result, that an earlier run at a uniform "
+            "5 × 10⁻⁵ for head and backbone had a randomly initialised head still predicting "
+            "background exclusively after two epochs; an equal-budget comparison of the two learning-"
+            "rate schemes was not performed.")
+    para(d, "Before any full run, two gates must pass: a visual check of index-stamped frame grids "
+            "produced by the loader, and a tiny-overfit test on a class-balanced subset. Balance "
+            "matters because the leading manifest rows come from one candidate and usually one class, "
+            "which a constant predictor memorises.")
 
-    para(d, "2.8. Step 6: Inference, Decoding and Evaluation", H2)
-    para(d, "At inference, windows slide across each candidate, class probabilities are smoothed "
-            "over adjacent windows, contiguous runs exceeding a per-class threshold become score "
-            "regions, and only regions of the same type are merged. A pickup adjacent to a putdown "
-            "is never merged into a single event, and one candidate may emit zero, one or several "
-            "ordered events.")
-    para(d, "Converting a run of above-threshold windows into an interval admits two natural "
-            "definitions, and the choice is consequential. Under the window-span definition the "
-            "interval runs from the first contributing window's start to the last one's end, so a "
-            "single above-threshold window produces an interval exactly one window in length. Under "
-            "the window-centre definition the interval runs from the first to the last contributing "
-            "window's centre, widened by half a stride on each side and subject to a minimum "
-            "duration.")
-    para(d, "The window-span definition carries a structural ceiling. If a single window fires on an "
-            "event of duration d with window length w, the predicted interval has length w and the "
-            "temporal IoU against the ground truth cannot exceed d / w. With d = 0.90 s and "
-            "w = 2.5 s that ceiling is 0.36, which lies below the conventional 0.5 operating point "
-            "irrespective of classifier quality. The window-centre definition carries no such "
-            "ceiling and is better motivated on its own terms, since a window is labelled by what "
-            "occupies its centre and the centre is therefore where its temporal evidence resides.")
-    para(d, "Predictions are scored with a class-aware evaluator that applies ignore intervals "
-            "consistently to both ground truth and predictions. We report precision, recall and F1 "
-            "at tIoU thresholds of 0.3 and 0.5, per-class F1, mean average precision, boundary mean "
-            "absolute error, and false positives per hour. Matching is one-to-one by Hungarian "
-            "assignment, and a prediction matches a ground-truth event only if the classes agree.")
-    para(d, "Splits are assigned at the level of recording day rather than clip. Recordings made "
-            "minutes apart share shoppers, lighting, shelf stock and merchandise placement, so a "
-            "clip-level split would place near-duplicates on both sides of the boundary and inflate "
-            "validation performance. Days are ranked by event count and the sparsest held out, "
-            "retaining the bulk of supervision in training; the dataset builder fails if any "
-            "recording appears under two splits. Decision thresholds and the smoothing width are "
-            "selected on validation alone, by the mean of F1 at tIoU 0.3 and 0.5 over a grid of 200 "
-            "combinations. The test split was not read during any selection step.")
+    para(d, "2.8. Step 6: Inference and Decoding", H2)
+    para(d, "At inference, windows slide across each candidate at the training stride, class "
+            "probabilities are smoothed by a moving average over adjacent windows, and for each event "
+            "class independently the smoothed probability is thresholded (no argmax is taken); "
+            "contiguous runs above threshold become score regions. Regions of the same type separated "
+            "by less than 0.75 s are merged; regions of different type are never merged; regions "
+            "shorter than 0.3 s are discarded. One candidate may emit zero, one or several ordered "
+            "events. Predictions from different candidates are not de-duplicated against one another.")
+    para(d, "A run of above-threshold windows is converted to an interval in one of two ways. "
+            "Window-span: from the first window's start to the last window's end. Window-centre: from "
+            "the first to the last window's centre, widened by half a stride each side and floored at "
+            "the minimum duration. Under window-span a single firing window yields an interval of "
+            "length L ≥ w; for a true event of duration d ≤ w, its temporal IoU satisfies "
+            "tIoU ≤ d / L ≤ d / w. This is a per-event bound under those assumptions, not a bound on "
+            "set-level F1. In this corpus, with w = 2.5 s, 32% of events have d < 0.3 w and 67% have "
+            "d < 0.5 w, so they cannot be matched at those thresholds under window-span when a single "
+            "window fires; with w = 1.5 s the fractions are 13% and 32%. Window-centre removes the "
+            "minimum length w, while the stride and minimum duration remain as resolution limits.")
 
-    para(d, "2.9. Code, Data and Reproducibility", H2)
-    para(d, "The complete implementation is openly available in the project repository at "
-            f"{REPO_URL} (branch {BRANCH}). The repository contains the CVAT import and canonical "
-            "table construction, the actor-conditioned window builder, the frame and embedding "
-            "caches, both training entry points, the sliding-window inference and decoding stage, "
-            "the threshold search, and the evaluation harness, together with 47 unit tests covering "
-            "the annotation import, window labelling, caching and decoding logic. Method "
-            "documentation is provided in docs/TRACK_B1_CVAT.md and the configuration used for the "
-            "reported acceptance run in configs/track_b1.yaml. The full pipeline is reproduced from "
-            "an existing annotation export by the single command make track-b1-all.")
-    para(d, "A reproducibility bundle accompanies the work and contains the 42 CVAT annotation "
-            "archives exactly as exported, the canonical event, clip, candidate and window-manifest "
-            "tables in both Parquet and CSV form, the per-clip actor tracks, the trained model "
-            "weights for both regimes, the complete evaluation artefacts for every reported "
-            "configuration, and a SHA-256 manifest covering every file. The source recordings "
-            "themselves are commercial store footage of members of the public and are not "
-            "redistributed; the bundle instead carries each recording's object-store location, size "
-            "and SHA-256 digest, so that a holder of the appropriate credentials can reconstruct the "
-            "exact input set and verify it byte-for-byte. Every figure and table in this manuscript "
-            "is generated directly from the stored evaluation artefacts rather than transcribed, "
-            "and the generating scripts are included in the repository.")
+    para(d, "2.9. Evaluation Protocol and Splits", H2)
+    para(d, "Two matching protocols are used and reported separately. Headline metrics use class-aware "
+            "one-to-one matching: within each recording, predictions and ground-truth events are "
+            "matched by Hungarian assignment maximising total temporal IoU, a pair being admissible "
+            "only if the classes agree and tIoU meets the threshold; inadmissible pairs are excluded "
+            "before optimisation. Precision, recall and F1 are micro-averaged from pooled TP, FP and "
+            "FN, and reported at tIoU 0.3 and 0.5. Per-class precision, recall and F1 are computed at "
+            "tIoU 0.5 by the same protocol restricted to that class. The confusion matrix uses a "
+            "second, class-agnostic protocol: the same one-to-one matching at tIoU 0.5 with the class "
+            "constraint removed, so that a putdown matched to a pickup prediction counts as an "
+            "off-diagonal entry. Predictions and events falling inside an ignore interval are removed "
+            "before matching. Mean average precision uses each event's peak smoothed probability as "
+            "its confidence, ranks predictions by it, and integrates precision over recall at tIoU "
+            "0.3, 0.5 and 0.7; the reported average is over those three. Boundary mean absolute error "
+            "is computed over class-aware matches at tIoU 0.5 only and the match count is reported "
+            "with it. False positives per hour divide FP at tIoU 0.5 by the unique duration of the "
+            "evaluated split's recordings.")
+    para(d, "Splits are assigned by recording day, never by clip, since recordings minutes apart "
+            "share shoppers, lighting and shelf stock. The rule is: rank the five days by event count "
+            "in ascending order; the first becomes validation and the second test. Event counts per "
+            "day are 60, 73 and 59 for the training days, 32 for 2026-05-23 (validation) and 35 for "
+            "2026-05-26 (test). The builder fails if any recording appears under two splits. Decision "
+            "thresholds and smoothing width are selected on validation only, by the mean of F1 at tIoU "
+            "0.3 and 0.5 over a 200-point grid.")
+    para(d, "The test split was read twice: once for the frozen probe and once for the fine-tuned "
+            "model, each with its configuration frozen beforehand. The decision to fine-tune, and every "
+            "threshold, was made on validation before the first test read; the second read did not "
+            "inform any subsequent choice. The post-hoc threshold sensitivity in Section 3.5 reads the "
+            "test split again and is presented as diagnostic only.")
+    para(d, "To characterise cross-day variation beyond a single held-out day, we additionally "
+            "perform leave-one-day-out evaluation of the frozen probe over all five days. For each "
+            "held-out day, the sparsest of the remaining four days serves as inner validation; the "
+            "head is trained on the other three, the checkpoint is selected on the inner day, and "
+            "thresholds are selected on the inner day over a 49-point grid. The held-out day is read "
+            "once. Windows from one day are not independent observations and no per-window "
+            "significance test is attempted.")
 
-    # ---------------- 3. Results ----------------
+    para(d, "2.10. Code, Data and Reproducibility", H2)
+    para(d, f"The implementation is at {REPO_URL}, branch {BRANCH}; the manuscript corresponds to "
+            f"release tag {RELEASE_TAG}. The repository contains the CVAT import, window builder, "
+            "frame and embedding caches, both training entry points, inference and decoding, the "
+            "threshold search, the evaluation harness, the results registry from which every table "
+            "and figure here is generated, and 47 unit tests. Method documentation is in "
+            "docs/TRACK_B1_CVAT.md and the acceptance configuration in configs/track_b1.yaml.")
+    para(d, "Reproducibility has two levels. Every table and figure can be regenerated from the "
+            "results registry and per-window score files, which are included in a reproducibility "
+            "bundle together with the 42 annotation archives, canonical tables, actor tracks, trained "
+            "weights for both regimes, and a SHA-256 manifest; no video access is required for this. "
+            "Retraining requires the source recordings, which are commercial footage of members of the "
+            "public and are not redistributed; the bundle carries each recording's storage location "
+            "and SHA-256 digest so a holder of the appropriate credentials can reconstruct and verify "
+            "the input set. The bundle is deposited with the corresponding author and provided on "
+            "request; a public archive with a DOI will be created on acceptance.")
+
+    # ================= 3. Results =================
     para(d, "3. Results", H1)
+    para(d, "All figures in this section are annotation-conditioned estimates as defined in "
+            "Section 1. Every number is traceable to one row of the results registry, identified by "
+            "model, split, boundary mode and threshold set, with TP, FP and FN recorded per row.")
 
-    para(d, "3.1. Decoder Geometry Dominates the Ablation", H2)
-    para(d, "Figure 1 reports validation F1 across four decode configurations with the frozen-probe "
-            "model held fixed. Tuning decision thresholds under window-span boundaries raises F1 at "
-            "tIoU 0.3 from 0.264 to 0.350. Substituting centre-derived boundaries raises it to "
-            "0.647, an improvement approximately four times larger than that obtained from "
-            "threshold tuning and achieved without retraining any component.")
+    para(d, "3.1. Decoder Geometry: A Controlled Comparison", H2)
+    para(d, "Figure 1 isolates the interval-construction rule. For each model, the same saved window "
+            "scores are decoded twice with identical thresholds and smoothing, differing only in "
+            "boundary mode. Table 2 gives the counts.")
     figure(d, figures / "fig1_decode_ablation.png",
-           "Figure 1. Validation event-level F1 across four decode configurations for the "
-           "frozen-probe model. The model is identical in all four; only the conversion of window "
-           "scores into intervals differs. The tIoU 0.5 bar is omitted for the second configuration, "
-           "which was not evaluated at that threshold.")
-    para(d, "The effect is most pronounced at the stricter operating point. Under window-span "
-            "boundaries, F1 at tIoU 0.5 was 0.075, consistent with the predicted ceiling of 0.36 "
-            "for 2.5 s windows applied to 0.9 s events. Under window-centre boundaries with a 1.5 s "
-            "window it reaches 0.523, and boundary mean absolute error falls from 1.35 s to 0.21 s. "
-            "Shortening the window from 2.5 s to 1.5 s and the stride from 0.5 s to 0.25 s "
-            "contributes a further gain concentrated at tIoU 0.5, which is the expected pattern if "
-            "the residual error after the boundary correction is temporal resolution rather than "
-            "classification.")
-
-    para(d, "3.2. Partial Fine-Tuning Improves Validation Performance", H2)
-    para(d, "Table 2 compares the two training regimes on validation. Unfreezing the final two "
-            "transformer blocks improves every reported metric, with the largest gains on the event "
-            "classes rather than on background.")
+           "Figure 1. Validation event F1 under window-span and window-centre interval construction, "
+           "decoded from identical window scores with identical validation-selected thresholds and "
+           "smoothing. Only the interval rule differs between the paired bars.")
     table(d, [
-        ["Metric", "Frozen probe", "Fine-tuned (2 blocks)"],
-        ["Window-level macro F1", "0.615", "0.743"],
-        ["Event F1 @ tIoU 0.3", num(m["fz_val"], "tiou@0.3", "f1"), num(m["ft_val"], "tiou@0.3", "f1")],
-        ["Event F1 @ tIoU 0.5", num(m["fz_val"], "tiou@0.5", "f1"), num(m["ft_val"], "tiou@0.5", "f1")],
-        ["Pickup F1", num(m["fz_val"], "per_type", "pickup", "f1"), num(m["ft_val"], "per_type", "pickup", "f1")],
-        ["Putdown F1", num(m["fz_val"], "per_type", "putdown", "f1"), num(m["ft_val"], "per_type", "putdown", "f1")],
-        ["mAP (average)", num(m["fz_val"], "mAP", "mAP_avg"), num(m["ft_val"], "mAP", "mAP_avg")],
-        ["Boundary MAE, start (s)", num(m["fz_val"], "start_mae_s", fmt="{:.2f}"),
-         num(m["ft_val"], "start_mae_s", fmt="{:.2f}")],
-        ["False positives per hour", num(m["fz_val"], "fp_per_hour", fmt="{:.1f}"),
-         num(m["ft_val"], "fp_per_hour", fmt="{:.1f}")],
-    ], "Table 2. Validation performance of the two training regimes. Both configurations use 1.5 s "
-       "windows, centre-derived interval boundaries, and decision thresholds selected on validation.")
-    para(d, "The fine-tuning trajectory is not monotone. After the first epoch the model reached a "
-            "pickup F1 of 0.635 while putdown collapsed to 0.057; the second epoch degraded both; "
-            "convergence to the reported optimum occurred at the fourth epoch, after which the "
-            "gap between training and validation performance began to widen. A schedule terminated "
-            "early on a short patience would have supported the opposite conclusion.")
+        ["Model, boundary", "F1@0.3", "TP/FP/FN @0.3", "F1@0.5", "TP/FP/FN @0.5", "Start MAE (s)"],
+        ["Frozen, span", f3(FZV_SPAN["f1@0.3"]),
+         f"{int(FZV_SPAN['tp@0.3'])}/{int(FZV_SPAN['fp@0.3'])}/{int(FZV_SPAN['fn@0.3'])}",
+         f3(FZV_SPAN["f1@0.5"]), f"{int(FZV_SPAN['tp@0.5'])}/{int(FZV_SPAN['fp@0.5'])}/{int(FZV_SPAN['fn@0.5'])}",
+         f2(FZV_SPAN["start_mae_s"])],
+        ["Frozen, centre", f3(FZV["f1@0.3"]),
+         f"{int(FZV['tp@0.3'])}/{int(FZV['fp@0.3'])}/{int(FZV['fn@0.3'])}",
+         f3(FZV["f1@0.5"]), f"{int(FZV['tp@0.5'])}/{int(FZV['fp@0.5'])}/{int(FZV['fn@0.5'])}",
+         f2(FZV["start_mae_s"])],
+        ["Fine-tuned, span", f3(FTV_SPAN["f1@0.3"]),
+         f"{int(FTV_SPAN['tp@0.3'])}/{int(FTV_SPAN['fp@0.3'])}/{int(FTV_SPAN['fn@0.3'])}",
+         f3(FTV_SPAN["f1@0.5"]), f"{int(FTV_SPAN['tp@0.5'])}/{int(FTV_SPAN['fp@0.5'])}/{int(FTV_SPAN['fn@0.5'])}",
+         f2(FTV_SPAN["start_mae_s"])],
+        ["Fine-tuned, centre", f3(FTV["f1@0.3"]),
+         f"{int(FTV['tp@0.3'])}/{int(FTV['fp@0.3'])}/{int(FTV['fn@0.3'])}",
+         f3(FTV["f1@0.5"]), f"{int(FTV['tp@0.5'])}/{int(FTV['fp@0.5'])}/{int(FTV['fn@0.5'])}",
+         f2(FTV["start_mae_s"])],
+    ], "Table 2. Controlled decoder comparison on validation. Same window scores, 1.5 s window, "
+       "0.25 s stride, validation-selected thresholds; only the boundary rule differs within each "
+       "model. Class-aware micro F1 with pooled counts.")
+    para(d, "With the classifier held fixed, window-centre decoding raises F1 at tIoU 0.5 from "
+            f"{f3(FZV_SPAN['f1@0.5'])} to {f3(FZV['f1@0.5'])} for the frozen probe and from "
+            f"{f3(FTV_SPAN['f1@0.5'])} to {f3(FTV['f1@0.5'])} for the fine-tuned model, and reduces "
+            f"start MAE from {f2(FZV_SPAN['start_mae_s'])} s to {f2(FZV['start_mae_s'])} s and from "
+            f"{f2(FTV_SPAN['start_mae_s'])} s to {f2(FTV['start_mae_s'])} s respectively. The effect "
+            "at tIoU 0.3 is smaller and, for the fine-tuned model, within the range where a handful "
+            "of matches decides the direction. This is consistent with the per-event bound of "
+            "Section 2.8: the 0.5 threshold is where 32% of events cannot be matched at all under "
+            "window-span. The earlier 2.5 s configuration, which changes the temporal input as well as "
+            "the decoder, is not included in this comparison for that reason.")
 
-    para(d, "3.3. Performance on the Held-Out Recording Day", H2)
-    para(d, "Table 3 reports both models on the held-out day, each evaluated with its own "
-            "validation-selected configuration.")
+    para(d, "3.2. Training Regimes on Validation", H2)
     table(d, [
-        ["Metric", "Frozen probe", "Fine-tuned (2 blocks)"],
-        ["Event F1 @ tIoU 0.3", num(m["fz_test"], "tiou@0.3", "f1"), num(m["ft_test"], "tiou@0.3", "f1")],
-        ["Event F1 @ tIoU 0.5", num(m["fz_test"], "tiou@0.5", "f1"), num(m["ft_test"], "tiou@0.5", "f1")],
-        ["Pickup F1", num(m["fz_test"], "per_type", "pickup", "f1"), num(m["ft_test"], "per_type", "pickup", "f1")],
-        ["Putdown F1", num(m["fz_test"], "per_type", "putdown", "f1"), num(m["ft_test"], "per_type", "putdown", "f1")],
-        ["mAP (average)", num(m["fz_test"], "mAP", "mAP_avg"), num(m["ft_test"], "mAP", "mAP_avg")],
-        ["False positives per hour", num(m["fz_test"], "fp_per_hour", fmt="{:.1f}"),
-         num(m["ft_test"], "fp_per_hour", fmt="{:.1f}")],
-    ], "Table 3. Performance on the held-out recording day. The configuration of each model was "
-       "frozen on validation before the test split was read.")
-    para(d, "Fine-tuning improves the aggregate figures and the direction of improvement agrees "
-            "with validation. The magnitude does not: validation F1 at tIoU 0.3 is "
-            f"{num(m['ft_val'], 'tiou@0.3', 'f1')} whereas the held-out day yields "
-            f"{num(m['ft_test'], 'tiou@0.3', 'f1')}. Figure 2 shows the gap for both models and "
-            "both classes.")
+        ["Validation (2026-05-23), centre decoding", "Frozen probe", "Fine-tuned (2 blocks)"],
+        ["Window-level macro F1 (selection metric)", "0.615", "0.743"],
+        ["Event F1 @ tIoU 0.3 (TP/FP/FN)", f"{f3(FZV['f1@0.3'])} ({int(FZV['tp@0.3'])}/{int(FZV['fp@0.3'])}/{int(FZV['fn@0.3'])})",
+         f"{f3(FTV['f1@0.3'])} ({int(FTV['tp@0.3'])}/{int(FTV['fp@0.3'])}/{int(FTV['fn@0.3'])})"],
+        ["Event F1 @ tIoU 0.5 (TP/FP/FN)", f"{f3(FZV['f1@0.5'])} ({int(FZV['tp@0.5'])}/{int(FZV['fp@0.5'])}/{int(FZV['fn@0.5'])})",
+         f"{f3(FTV['f1@0.5'])} ({int(FTV['tp@0.5'])}/{int(FTV['fp@0.5'])}/{int(FTV['fn@0.5'])})"],
+        ["Pickup F1 @ 0.5", f3(FZV["pickup_f1@0.5"]), f3(FTV["pickup_f1@0.5"])],
+        ["Putdown F1 @ 0.5", f3(FZV["putdown_f1@0.5"]), f3(FTV["putdown_f1@0.5"])],
+        ["mAP (0.3/0.5/0.7 avg)", f3(FZV["mAP_avg"]), f3(FTV["mAP_avg"])],
+        [f"Start MAE (s), n matched", f"{f2(FZV['start_mae_s'])} (n={int(FZV['n_matched_for_mae'])})",
+         f"{f2(FTV['start_mae_s'])} (n={int(FTV['n_matched_for_mae'])})"],
+        [f"FP per hour @0.5 ({FZV['unique_video_hours']:.2f} h)", f1(FZV["fp_per_hour@0.5"]), f1(FTV["fp_per_hour@0.5"])],
+    ], "Table 2b. Validation performance of the two regimes at their validation-selected thresholds "
+       "(frozen: pickup 0.45, putdown 0.60, smoothing 3; fine-tuned: 0.40, 0.45, 5). Registry rows "
+       "frozen_probe|val|window_centers|tuned and finetuned_2blocks|val|window_centers|tuned.")
+    para(d, "Unfreezing the final two blocks improves every reported metric on validation. The "
+            "trajectory is not monotone: after one epoch the model reached pickup F1 0.635 with "
+            "putdown at 0.057, the second epoch degraded both, and the optimum arrived at epoch four, "
+            "after which the train/validation gap widened.")
+
+    para(d, "3.3. Held-Out Recording Day", H2)
+    table(d, [
+        ["Test (2026-05-26), centre decoding", "Frozen probe", "Fine-tuned (2 blocks)"],
+        ["Event F1 @ tIoU 0.3 (TP/FP/FN)", f"{f3(FZT['f1@0.3'])} ({int(FZT['tp@0.3'])}/{int(FZT['fp@0.3'])}/{int(FZT['fn@0.3'])})",
+         f"{f3(FTT['f1@0.3'])} ({int(FTT['tp@0.3'])}/{int(FTT['fp@0.3'])}/{int(FTT['fn@0.3'])})"],
+        ["Event F1 @ tIoU 0.5 (TP/FP/FN)", f"{f3(FZT['f1@0.5'])} ({int(FZT['tp@0.5'])}/{int(FZT['fp@0.5'])}/{int(FZT['fn@0.5'])})",
+         f"{f3(FTT['f1@0.5'])} ({int(FTT['tp@0.5'])}/{int(FTT['fp@0.5'])}/{int(FTT['fn@0.5'])})"],
+        ["Pickup F1 @ 0.5", f3(FZT["pickup_f1@0.5"]), f3(FTT["pickup_f1@0.5"])],
+        ["Putdown F1 @ 0.5 (TP/FN)", f"{f3(FZT['putdown_f1@0.5'])} ({int(FZT['putdown_tp@0.5'])}/{int(FZT['putdown_fn@0.5'])})",
+         f"{f3(FTT['putdown_f1@0.5'])} ({int(FTT['putdown_tp@0.5'])}/{int(FTT['putdown_fn@0.5'])})"],
+        ["mAP (0.3/0.5/0.7 avg)", f3(FZT["mAP_avg"]), f3(FTT["mAP_avg"])],
+        ["Start MAE (s), n matched", f"{f2(FZT['start_mae_s'])} (n={int(FZT['n_matched_for_mae'])})",
+         f"{f2(FTT['start_mae_s'])} (n={int(FTT['n_matched_for_mae'])})"],
+        [f"FP per hour @0.5 ({FZT['unique_video_hours']:.2f} h)", f1(FZT["fp_per_hour@0.5"]), f1(FTT["fp_per_hour@0.5"])],
+    ], "Table 3. Performance on the held-out day at the configurations frozen on validation. "
+       "Registry rows frozen_probe|test|window_centers|tuned and finetuned_2blocks|test|window_centers|tuned.")
+    para(d, "Fine-tuning improves aggregate F1 on the held-out day and the direction agrees with "
+            f"validation; the magnitude does not, {f3(FTV['f1@0.3'])} against {f3(FTT['f1@0.3'])} at "
+            "tIoU 0.3. Figure 2 shows the gap for both models and both classes. At the "
+            "validation-selected operating point the fine-tuned model achieved zero putdown F1 on the "
+            f"held-out day: {int(FTT['putdown_tp@0.5'])} of 12 putdowns matched, against "
+            f"{int(FZT['putdown_tp@0.5'])} for the frozen probe. False positives per hour on the "
+            f"held-out day are {f1(FTT['fp_per_hour@0.5'])} for the fine-tuned model over "
+            f"{FTT['unique_video_hours']:.2f} h of unique footage.")
     figure(d, figures / "fig2_val_test_gap.png",
-           "Figure 2. Validation and held-out-day event-level F1 for both training regimes. The "
-           "aggregate gap is substantial for both models and is carried almost entirely by the "
-           "putdown class.")
+           "Figure 2. Validation and held-out-day event F1 for both regimes at their "
+           "validation-selected configurations. The gap is carried largely by the putdown class.")
 
-    para(d, "3.4. The Gap Is a Directional Failure, Not a Calibration Failure", H2)
-    para(d, "The putdown class fails completely on the held-out day. The fine-tuned model predicted "
-            "33 pickups and 2 putdowns against a ground truth of 23 and 12 respectively.")
-    para(d, "The immediate hypothesis is threshold miscalibration, the putdown threshold of 0.45 "
-            "selected on the validation day being too strict for the held-out day. The window-score "
-            "distributions exclude this explanation. Table 4 reports mean predicted probabilities "
-            "on windows whose ground-truth label is putdown.")
-    table(d, [
-        ["Split", "Mean p(putdown)", "Mean p(pickup)", "Fraction above threshold"],
-        ["Validation day", "0.445", "0.296", "0.49"],
-        ["Held-out test day", "0.062", "0.588", "0.02"],
-    ], "Table 4. Mean predicted class probability on windows whose ground-truth label is putdown, "
-       "fine-tuned model.")
-    para(d, "On the held-out day the model is not uncertain about putdowns. It assigns them a mean "
-            "pickup probability of 0.588, which is to say it confidently classifies them as the "
-            "opposite class. Figure 3 shows the full distributions: on validation the scores are "
-            "bimodal with substantial mass above the decision threshold, whereas on the held-out "
-            "day the entire distribution lies below it. The maximum p(putdown) across all 57 "
-            "true-putdown windows of the held-out day is 0.467, so no threshold choice recovers the "
-            "class.")
-    figure(d, figures / "fig3_putdown_probability_shift.png",
-           "Figure 3. Distribution of predicted putdown probability on windows whose ground truth "
-           "is putdown, fine-tuned model. On the validation day the distribution is bimodal with "
-           "substantial mass above the decision threshold. On the held-out day it lies almost "
-           "entirely near zero, with no window exceeding 0.467.", width_in=4.7)
-    para(d, "The class-confusion structure in Figure 4 confirms this interpretation. On validation, "
-            "matched putdowns are predominantly recovered as putdowns. On the held-out day every "
-            "matched putdown is assigned to pickup and none to putdown.")
+    para(d, "3.4. Localisation Transfers; Direction Shifts", H2)
+    para(d, "Under class-agnostic matching at tIoU 0.5, 17 of the 35 held-out-day events are matched "
+            "by some prediction (recall 0.49), including 6 of the 12 putdowns; Figure 3 shows the "
+            "confusion over those 17. All six matched putdowns are predicted as pickup. Boundary MAE "
+            f"over the {int(FTT['n_matched_for_mae'])} class-aware matches is "
+            f"{f2(FTT['start_mae_s'])} s at the start and {f2(FTT['end_mae_s'])} s at the end, against "
+            f"{f2(FTV['start_mae_s'])} s and {f2(FTV['end_mae_s'])} s on validation; the start error "
+            "roughly triples and is 72% of the median event duration, so localisation degrades "
+            "materially even where events are found, and the MAE excludes the 18 unmatched events.")
     figure(d, figures / "fig4_confusion.png",
-           "Figure 4. Class confusion at tIoU 0.5 for the fine-tuned model. Rows denote ground "
-           "truth and columns prediction. On the held-out day all six matched putdown events are "
-           "classified as pickups.", width_in=4.7)
-    para(d, "Localisation, by contrast, transfers acceptably. Boundary mean absolute error on the "
-            f"held-out day is {num(m['ft_test'], 'start_mae_s', fmt='{:.2f}')} s at the start and "
-            f"{num(m['ft_test'], 'end_mae_s', fmt='{:.2f}')} s at the end, against "
-            f"{num(m['ft_val'], 'start_mae_s', fmt='{:.2f}')} s and "
-            f"{num(m['ft_val'], 'end_mae_s', fmt='{:.2f}')} s on validation. The model continues to "
-            "detect interactions and to place them accurately in time. What it loses across "
-            "recording days is the direction.")
+           "Figure 3. Class confusion under class-agnostic one-to-one matching at tIoU 0.5, "
+           "fine-tuned model. Rows are ground truth, columns prediction, over matched events only "
+           "(validation 22, held-out day 17).", width_in=4.7)
+    para(d, "Scores on true putdown windows of the held-out day are shifted towards pickup: mean "
+            "p(putdown) is 0.062 and mean p(pickup) 0.588, against 0.445 and 0.296 on validation "
+            "(Table 4, Figure 4). One of the 57 true-putdown windows exceeds the 0.45 threshold; the "
+            "maximum is 0.467. These observations indicate a substantial directional classification "
+            "failure at the selected operating point, but do not by themselves rule out partial "
+            "recovery through alternative thresholds, which Section 3.5 examines.")
+    table(d, [
+        ["Windows with ground truth = putdown", "Mean p(putdown)", "Mean p(pickup)", "Fraction > 0.45", "n"],
+        ["Validation day", "0.445", "0.296", "0.49", "63"],
+        ["Held-out day", "0.062", "0.588", "0.02", "57"],
+    ], "Table 4. Mean predicted probability on true-putdown windows, fine-tuned model. Windows "
+       "overlap by construction and are not independent.")
+    figure(d, figures / "fig3_putdown_probability_shift.png",
+           "Figure 4. Distribution of p(putdown) on true-putdown windows, fine-tuned model, validation "
+           "versus held-out day. Windows overlap and the two histograms are drawn from 63 and 57 "
+           "windows respectively.", width_in=4.7)
 
-    # ---------------- 4. Discussion ----------------
+    para(d, "3.5. Post-Hoc Threshold Sensitivity (Diagnostic Only)", H2)
+    para(d, "To test whether any operating point recovers the class, we sweep the putdown threshold "
+            "on the held-out day with all other settings fixed (Figure 5). This reads the test split "
+            "after the reported results and its optimum is not a test result. Putdown recall is zero "
+            "for every threshold from 0.25 upward; below 0.25 it rises, reaching recall 0.42 at "
+            "precision 0.38 (F1 0.40, 5 of 12) at a threshold of 0.05, far from any value the "
+            "validation search would select. Partial recovery is therefore possible in principle, at "
+            "an operating point that cannot be chosen without access to the held-out day and at a "
+            "precision that would be unacceptable in use.")
+    figure(d, figures / "fig6_putdown_sensitivity.png",
+           "Figure 5. Held-out-day putdown precision, recall and F1 versus the putdown threshold, "
+           "fine-tuned model, all other settings fixed at the validation-selected values. Post-hoc "
+           "diagnostic; the test split is read again for this figure.", width_in=4.9)
+
+    para(d, "3.6. Leave-One-Day-Out Over All Five Days", H2)
+    para(d, "A single held-out day with 12 putdowns cannot establish a general property. Table 5 and "
+            "Figure 6 report the frozen probe with each of the five days held out in turn, checkpoint "
+            "and thresholds selected on the inner days only. The fine-tuned regime was not run under "
+            "this protocol owing to its cost; the cached-embedding path makes the frozen-probe "
+            "evaluation inexpensive.")
+    table(d, [["Held-out day", "Inner val day", "Thresholds", "Events", "F1@0.3", "F1@0.5",
+               "Putdown F1", "FP/h"]] + [
+        [str(x["held_out_day"])[:4] + "-" + str(x["held_out_day"])[4:6] + "-" + str(x["held_out_day"])[6:],
+         str(x["inner_val_day"])[4:6] + "-" + str(x["inner_val_day"])[6:],
+         f"{x['pickup_thr']:.2f}/{x['putdown_thr']:.2f}", int(x["n_gt_events"]),
+         f3(x["f1@0.3"]), f3(x["f1@0.5"]), f3(x["putdown_f1@0.5"]), f1(x["fp_per_hour@0.5"])]
+        for _, x in lodo.iterrows()
+    ] + [["Mean ± SD", "", "", "", f"{f3(lodo_m3)} ± {f3(lodo_s3)}",
+          f"{f3(lodo['f1@0.5'].mean())} ± {f3(lodo['f1@0.5'].std())}",
+          f"{f3(lodo_mp)} ± {f3(lodo_sp)}", f"{f1(lodo['fp_per_hour@0.5'].mean())}"]],
+          "Table 5. Leave-one-day-out evaluation of the frozen probe. Selection uses the inner days "
+          "only; each held-out day is read once. Registry file lodo_frozen.csv.")
+    figure(d, figures / "fig5_lodo.png",
+           "Figure 6. Held-out-day event F1 for the frozen probe under leave-one-day-out. The dashed "
+           "line and band give the mean and one standard deviation of F1 at tIoU 0.3; the dotted line "
+           "is the single-split validation figure of Table 2b.")
+    para(d, f"Mean F1 at tIoU 0.3 across the five held-out days is {f3(lodo_m3)} ± {f3(lodo_s3)}, "
+            f"against {f3(FZV['f1@0.3'])} on the single validation day used for selection in the main "
+            "protocol, which lies more than two standard deviations above the leave-one-day-out mean. "
+            f"Putdown F1 ranges from {f3(lodo['putdown_f1@0.5'].min())} to "
+            f"{f3(lodo['putdown_f1@0.5'].max())} across days (mean {f3(lodo_mp)}). False positives "
+            f"per hour range from {f1(lodo['fp_per_hour@0.5'].min())} to "
+            f"{f1(lodo['fp_per_hour@0.5'].max())}, rising on the busier days.")
+
+    # ================= 4. Discussion =================
     para(d, "4. Discussion", H1)
-
-    para(d, "4.1. What Transfers and What Does Not", H2)
-    para(d, "The results separate into two components. Detecting that a shelf interaction has "
-            "occurred, and localising it in time, transfer across recording days with moderate "
-            "degradation. Determining the direction in which the item moved does not transfer.")
-    para(d, "This is consistent with the structure of the task. The presence of an interaction is "
-            "supported by cues that are abundant and stable: a hand enters the shelf region, "
-            "occlusion patterns change, motion energy rises. Direction is supported by a single and "
-            "subtler cue, the temporal ordering of the hand-state change relative to the "
-            "shelf-state change, and that ordering is expressed in appearance in ways that depend "
-            "on camera angle, shelf geometry, item type and individual reaching behaviour. A model "
-            "of sufficient capacity will fit the majority class's expression of that cue on the "
-            "training days without acquiring anything that survives a change of day.")
-    para(d, "The class imbalance reinforces the effect. Pickups outnumber putdowns by 170 to 89 "
-            "across the corpus and by 23 to 12 on the held-out day. A model uncertain about "
-            "direction minimises expected loss by defaulting to the more frequent class, which is "
-            "precisely the behaviour the confusion matrix exhibits.")
-    para(d, "For a self-checkout application this failure mode is more damaging than the aggregate "
-            "F1 conveys. A system that detects interactions reliably but assigns direction "
-            f"according to the class prior will systematically charge customers for items they "
-            f"returned to the shelf. An aggregate F1 of {num(m['ft_test'], 'tiou@0.3', 'f1')} does "
-            "not communicate this; a per-class recall of 0.000 on putdown does.")
+    para(d, "4.1. Observations and Candidate Explanations", H2)
+    para(d, "Three observations are supported by the data. First, decoder geometry and crop "
+            "conditioning had larger effects on reported figures than the choice of training regime, "
+            "and both would be invisible in a single aggregate number. Second, the pickup/putdown "
+            "distinction is the component that degrades most across recording days: on every "
+            "held-out day of the leave-one-day-out protocol putdown F1 is below 0.36, and on the main "
+            "held-out day it is zero for the fine-tuned model at the selected operating point. Third, "
+            "the single-split validation figure overstates expected held-out performance by roughly "
+            "two standard deviations of the day-to-day variation.")
+    para(d, "We offer explanations as hypotheses, not established causes. Presence of an interaction "
+            "is supported by many stable cues; direction rests on the ordering of a hand-state change "
+            "relative to a shelf-state change, a subtler signal that the arrow-of-time literature [10] "
+            "shows to be learnable but distinct from static appearance. The class imbalance (170 "
+            "pickups to 89 putdowns) is a plausible contributor to the pickup bias, although "
+            "inverse-frequency weighting was applied and the data cannot separate its effect from "
+            "others. The camera is fixed, so viewpoint does not vary between days; shelf stock, item "
+            "types, shoppers and lighting do. Whether the model exploits static cues rather than "
+            "temporal order is testable with a single-frame baseline and a shuffled-frame control, "
+            "neither of which was run; both are listed in Section 4.4.")
+    para(d, "For a checkout application the practical reading is that, under these conditions, the "
+            "system detects interactions with moderate recall and assigns direction with a strong "
+            "pickup bias on unseen days. Aggregate F1 does not communicate this; per-class recall does.")
 
     para(d, "4.2. Generalisable Observations on Pipeline Construction", H2)
-    para(d, "Two of the three findings concern machinery surrounding the model rather than the "
-            "model, and both proved more consequential than any architectural change.")
-    para(d, "The interval-construction result is a specific instance of a general hazard: where the "
-            "unit of prediction is coarser than the unit being predicted, the aggregation rule "
-            "imposes a ceiling on the evaluation metric that is readily misattributed to the "
-            "classifier. The ceiling d / w is simple enough to compute in advance, and we would "
-            "encourage its explicit calculation whenever sliding-window detection is evaluated "
-            "under temporal IoU. In the present case it accounted for the difference between an "
-            "apparently failing system and a usable one.")
-    para(d, "The crop-conditioning result is a second instance of the same class of problem. "
-            "Conditioning information available only for positive examples will, through whatever "
-            "fallback the implementation selects, encode the label. The fallback in our case "
-            "appeared innocuous and would not have been visible in any loss curve. The remedy, "
-            "extending conditioning across a padding interval so that positive and negative "
-            "examples share geometry, generalises to any actor-conditioned or region-conditioned "
-            "formulation.")
-    para(d, "Both were identified by rendering the output of the data loader and inspecting it, "
-            "which is why we treat visual inspection as a required verification step rather than an "
-            "optional diagnostic convenience.")
+    para(d, "Where the unit of prediction is coarser than the unit predicted, the aggregation rule "
+            "imposes a per-event bound on the evaluation metric that is easy to misattribute to the "
+            "classifier. The bound d / w is simple to compute, and the fraction of events with "
+            "d < τ w should be reported alongside any sliding-window tIoU result. Separately, "
+            "conditioning information available only for positives will, through whatever fallback "
+            "the implementation chooses, encode the label; extending conditioning across a padding "
+            "interval so that positives and negatives share geometry is one remedy, subject to the "
+            "caveats in Section 2.5. Both were found by rendering the loader's output and looking at "
+            "it.")
 
     para(d, "4.3. Limitations", H2)
-    para(d, "The most significant limitation concerns conditioning. Candidates and crop regions are "
-            "derived from the ground-truth annotation boxes, and are used at inference as well as "
-            "during training. The model is therefore supplied with the actor's spatial region and "
-            "the approximate temporal neighbourhood of each event, neither of which is available at "
-            "deployment. The reported figures should accordingly be read as an upper bound on what "
-            "this route would achieve in production rather than as the performance of a deployable "
-            "system, and substituting a pose-derived candidate and crop source is the principal "
-            "outstanding item of work.")
-    para(d, "The corpus comprises five recording days, so the validation and test splits each "
-            "consist of a single day, and every reported figure for either split describes one "
-            "day's shelves, lighting and shoppers over 32 and 35 events respectively. Decision "
-            "thresholds selected on 32 events from a single day cannot be expected to transfer, and "
-            "did not. We regard the resulting estimates as high in variance rather than incorrect: "
-            "validation should be read as an optimistic bound and the held-out day as a single "
-            "noisy sample. Grouped cross-validation over all five days, reporting mean and spread "
-            "across folds, would yield a substantially more trustworthy figure at five times the "
-            "computational cost, and its absence is the principal methodological limitation of this "
-            "study. The held-out split has additionally been read twice, once per training regime; "
-            "neither reading informed any decision, but the split is no longer perfectly naive.")
-    para(d, "The corpus derives from a single camera in a single store, so nothing reported here "
-            "establishes that the directional failure is a general property of video transformers "
-            "rather than of this viewpoint. Actor identity is per-interaction rather than "
-            "per-person, since CVAT tracks are drawn per event; two interactions by the same "
-            "shopper form two actor streams. The synthetic negatives constructed for the seven "
-            "cleared recordings are conditioned on borrowed boxes that do not correspond to any "
-            "person's location, and are valid negatives for the transfer question but not for a "
-            "presence question. Thirteen of the 261 annotated intervals remained in draft review "
-            "status and were included; an option to exclude them exists but was not exercised. "
-            "Ignore intervals are sparse, three across 42 recordings, so ignore handling is "
-            "exercised but not stressed. Finally, the fine-tuning comparison uses a five-epoch "
-            "budget with a warm-started head, and a longer schedule, stronger augmentation or "
-            "minority-class oversampling might alter the balance between the two regimes.")
+    para(d, "The results are estimates under oracle conditioning: candidates and crops derive from "
+            "ground-truth boxes at inference as well as in training, and no independent proposal "
+            "generator was evaluated. End-to-end detection in continuous video, with its own recall "
+            "ceiling and false-alarm rate, is outside the scope of this study. The corpus has five "
+            "recording days from one camera in one store; the leave-one-day-out evaluation "
+            "characterises variation within that corpus and nothing about other stores. The frozen "
+            "probe alone was evaluated under leave-one-day-out. The test split was read twice for "
+            "reported results and once more for the diagnostic sweep. Annotation was by a single "
+            "annotator with no independent re-review; the borrowed-box pool for verified negatives "
+            "spans the whole corpus; padded background windows were not checked for the presence of "
+            "another actor's event; the crop shortcut was not quantified; and no temporal-order "
+            "control was run. Thirteen draft-status intervals were included without a sensitivity "
+            "check. The learning-rate observation of Section 2.7 is not a controlled comparison.")
 
     para(d, "4.4. Future Work", H2)
-    para(d, "The most direct response to the directional failure is to supervise direction "
-            "explicitly rather than expecting it to be acquired incidentally. Three routes appear "
-            "worthwhile, in decreasing order of expected value.")
-    para(d, "Day-level grouped cross-validation should be undertaken first, because without it no "
-            "subsequent comparison can be trusted at this data scale. Direction could then be made "
-            "an explicit learning target: time-reversal augmentation, in which a reversed pickup is "
-            "presented as a putdown, forces the representation to encode ordering, and a pretext "
-            "task predicting frame order within a window or a loss term defined over the "
-            "hand-state and shelf-state transition sequence would serve a comparable purpose. "
-            "Third, direction may be supplied from outside the appearance model: a parallel "
-            "component of the same system estimates hand state (empty or carrying) and shelf state "
-            "(object removed, placed or unchanged) from frozen image embeddings, and the sign of "
-            "the shelf-state transition is precisely the quantity the window classifier fails to "
-            "transfer. Fusing that estimate as a directional prior, with the video transformer "
-            "supplying detection and localisation and the state classifier supplying direction, "
-            "matches each component to the sub-problem it demonstrably solves.")
+    para(d, "In order of expected value: an independent candidate generator that does not use test "
+            "annotations, with its recall and false-alarm rate reported, so that end-to-end claims "
+            "become possible; a controlled crop ablation (full-frame fallback versus padded crops, "
+            "plus a geometry-only classifier) to measure the shortcut; single-frame and shuffled-order "
+            "baselines, and a chronological-versus-reversed comparison, to establish whether temporal "
+            "order is used; leave-one-day-out for the fine-tuned regime with several seeds; and "
+            "objectives that encourage temporal-order sensitivity, such as time-reversal augmentation "
+            "with class swap, whose semantic validity for multi-item interactions should be checked "
+            "before use. The observed failure on held-out days motivates these experiments; it does "
+            "not establish that the failure is intrinsic to video transformers.")
 
-    # ---------------- 5. Conclusions ----------------
+    # ================= 5. Conclusions =================
     para(d, "5. Conclusions", H1)
-    para(d, "We trained an actor-conditioned VideoMAE window classifier for retail pickup and "
-            "putdown detection on 42 annotated recordings, and found that the pipeline surrounding "
-            "the model mattered more than the model itself. Replacing span-derived with "
-            "centre-derived interval boundaries raised validation F1 at tIoU 0.3 from 0.350 to "
-            "0.647 without retraining, because a window longer than the event it detects imposes an "
-            "arithmetic ceiling on temporal IoU. Holding annotation boxes across a padding interval "
-            "removed a crop-geometry shortcut that would otherwise have permitted the classifier to "
-            "separate the classes without observing the action.")
-    para(d, "Partial fine-tuning of the final two transformer blocks improved validation event F1 "
-            f"from 0.585 to {num(m['ft_val'], 'tiou@0.3', 'f1')} and held-out-day performance from "
-            f"{num(m['fz_test'], 'tiou@0.3', 'f1')} to {num(m['ft_test'], 'tiou@0.3', 'f1')}. The "
-            "gap between those figures is the substantive result. Detection and temporal "
-            "localisation transfer across recording days; the pickup and putdown direction does "
-            "not. On the held-out day true putdowns received a mean putdown probability of 0.062 "
-            "against a pickup probability of 0.588, with no window exceeding 0.467, leaving the "
-            "system an interaction detector with a pickup bias.")
-    para(d, "We conclude that the direction of transfer requires explicit supervision rather than "
-            "emerging from class labels alone, and that at five recording days grouped "
-            "cross-validation over days should constitute the reporting standard. For deployment, "
-            "per-class recall on the minority class rather than aggregate F1 is the quantity that "
-            "should govern the decision.")
+    para(d, "Within an annotation-conditioned evaluation of an actor-conditioned VideoMAE classifier "
+            "for retail pickup and putdown, the surrounding pipeline determined more of the reported "
+            "performance than the model. On identical window scores, centre-derived interval "
+            f"boundaries raised validation F1 at tIoU 0.5 from {f3(FTV_SPAN['f1@0.5'])} to "
+            f"{f3(FTV['f1@0.5'])}; holding annotation boxes across a padding interval removed a crop "
+            "shortcut that would otherwise let the classes be separated on geometry.")
+    para(d, f"Partial fine-tuning raised validation event F1 to {f3(FTV['f1@0.3'])} and held-out-day "
+            f"F1 to {f3(FTT['f1@0.3'])}, but achieved zero putdown F1 on the held-out day at the "
+            "validation-selected operating point, with scores on true putdowns shifted towards "
+            "pickup. Leave-one-day-out evaluation of the frozen probe places mean F1 at "
+            f"{f3(lodo_m3)} ± {f3(lodo_s3)} and mean putdown F1 at {f3(lodo_mp)} ± {f3(lodo_sp)} "
+            "across the five days, so the directional weakness recurs and the single validation day "
+            "was optimistic.")
+    para(d, "The observed failure on held-out days motivates evaluation across recording days as the "
+            "reporting standard at this data scale, and experiments that explicitly encourage "
+            "temporal-order sensitivity. The current evidence does not establish that the failure is "
+            "intrinsic to video transformers. For deployment decisions, per-class recall on the "
+            "minority class and false positives per hour of unique footage are the quantities to "
+            "report.")
 
-    # ---------------- Back matter ----------------
+    # ================= Back matter =================
     rich(d, [("Author Contributions: ", "b"),
-             "Conceptualization, F.L. and F.L.; methodology, F.L.; software, F.L.; validation, "
-             "F.L. and F.L.; formal analysis, F.L.; investigation, F.L.; data curation, F.L.; "
-             "writing—original draft preparation, F.L.; writing—review and editing, F.L.; "
-             "visualization, F.L.; supervision, F.L. All authors have read and agreed to the "
-             "published version of the manuscript."], BACK)
+             "Conceptualization, F.L. and F.L.; methodology, F.L.; software, F.L.; validation, F.L.; "
+             "formal analysis, F.L.; data curation, F.L.; writing—original draft, F.L.; writing—review "
+             "and editing, F.L.; visualization, F.L.; supervision, F.L. All authors have read and agreed "
+             "to the published version of the manuscript."], BACK)
     rich(d, [("Funding: ", "b"), "This research received no external funding."], BACK)
     rich(d, [("Institutional Review Board Statement: ", "b"),
-             "Not applicable. The study analyses pre-existing retail surveillance footage that was "
-             "anonymised at source before being made available to the research team. No personally "
-             "identifying features were accessible to the annotators or the authors."], BACK)
+             "The study is a secondary analysis of operational store footage that was anonymised by "
+             "the data provider before release to the authors; faces and identifying features were "
+             "obscured at source and the authors had no access to un-anonymised material. No "
+             "institutional ethics review was sought for this secondary analysis. The authors' "
+             "institutions should confirm whether such review is required under their policies."], BACK)
     rich(d, [("Informed Consent Statement: ", "b"),
-             "Not applicable. No identifiable personal data were processed."], BACK)
+             "Not applicable; no identifiable personal data were processed by the authors."], BACK)
     rich(d, [("Data Availability Statement: ", "b"),
-             "The complete source code, configuration and evaluation harness are openly available "
-             f"at {REPO_URL} (branch {BRANCH}). Derived annotation artefacts — canonical event "
-             "tables, ignore intervals, actor tracks, window manifests, per-window model scores, "
-             "trained model weights and all evaluation metrics — are provided as a reproducibility "
-             "bundle with a SHA-256 manifest, available from the corresponding author on reasonable "
-             "request. The source recordings are commercial retail footage of members of the public "
-             "and are not publicly redistributable; the bundle carries each recording's storage "
-             "location, size and SHA-256 digest so that the exact input set can be reconstructed "
-             "and verified by holders of the appropriate credentials. All figures and tables in "
-             "this manuscript are generated directly from the stored metrics files, and the "
-             "generating scripts are included in the code release."], BACK)
-    rich(d, [("Acknowledgments: ", "b"),
-             "The authors thank the annotation team for the CVAT labelling effort underlying this "
-             "study."], BACK)
+             f"Source code, configuration and evaluation harness: {REPO_URL}, branch {BRANCH}, "
+             f"release tag {RELEASE_TAG}. Results registry, per-window scores, canonical annotation "
+             "tables, actor tracks, trained weights and a SHA-256 manifest are provided in a "
+             "reproducibility bundle from which every table and figure can be regenerated without "
+             "video access; it is deposited with the corresponding author and provided on request, "
+             "and will be archived with a DOI on acceptance. The source recordings are commercial "
+             "footage of members of the public and are not redistributable; the bundle carries each "
+             "recording's storage location and SHA-256 digest."], BACK)
+    rich(d, [("Acknowledgments: ", "b"), "The authors thank the annotator for the CVAT labelling "
+             "effort underlying this study."], BACK)
     rich(d, [("Conflicts of Interest: ", "b"), "The authors declare no conflict of interest."], BACK)
 
-    # ---------------- References ----------------
+    # ================= References =================
     para(d, "References", H1)
     for ref in [
-        "Idrees, H.; Zamir, A.R.; Jiang, Y.-G.; Gorban, A.; Laptev, I.; Sukthankar, R.; Shah, M. "
-        "The THUMOS challenge on action recognition for videos “in the wild”. Comput. Vis. Image "
-        "Underst. 2017, 155, 1–23. https://doi.org/10.1016/j.cviu.2016.10.018",
-        "Caba Heilbron, F.; Escorcia, V.; Ghanem, B.; Carlos Niebles, J. ActivityNet: A large-scale "
-        "video benchmark for human activity understanding. In Proceedings of the IEEE Conference on "
-        "Computer Vision and Pattern Recognition (CVPR), Boston, MA, USA, 7–12 June 2015; "
-        "pp. 961–970.",
-        "Lin, T.; Liu, X.; Li, X.; Ding, E.; Wen, S. BMN: Boundary-matching network for temporal "
-        "action proposal generation. In Proceedings of the IEEE/CVF International Conference on "
-        "Computer Vision (ICCV), Seoul, Korea, 27 October–2 November 2019; pp. 3889–3898. "
+        "Idrees, H.; Zamir, A.R.; Jiang, Y.-G.; Gorban, A.; Laptev, I.; Sukthankar, R.; Shah, M. The "
+        "THUMOS challenge on action recognition for videos “in the wild”. Comput. Vis. Image Underst. "
+        "2017, 155, 1–23. https://doi.org/10.1016/j.cviu.2016.10.018",
+        "Caba Heilbron, F.; Escorcia, V.; Ghanem, B.; Carlos Niebles, J. ActivityNet: A large-scale video "
+        "benchmark for human activity understanding. In Proceedings of the IEEE Conference on Computer "
+        "Vision and Pattern Recognition (CVPR), Boston, MA, USA, 7–12 June 2015; pp. 961–970.",
+        "Lin, T.; Liu, X.; Li, X.; Ding, E.; Wen, S. BMN: Boundary-matching network for temporal action "
+        "proposal generation. In Proceedings of the IEEE/CVF International Conference on Computer Vision "
+        "(ICCV), Seoul, Korea, 27 October–2 November 2019; pp. 3889–3898. "
         "https://doi.org/10.48550/arXiv.1907.09702",
-        "Zhang, C.-L.; Wu, J.; Li, Y. ActionFormer: Localizing moments of actions with transformers. "
-        "In Computer Vision – ECCV 2022; Lecture Notes in Computer Science, Vol. 13664; Springer: "
-        "Cham, Switzerland, 2022; pp. 492–510. https://doi.org/10.1007/978-3-031-19772-7_29",
-        "Goyal, R.; Ebrahimi Kahou, S.; Michalski, V.; Materzynska, J.; Westphal, S.; Kim, H.; "
-        "Haenel, V.; Fruend, I.; Yianilos, P.; Mueller-Freitag, M.; et al. The “something something” "
-        "video database for learning and evaluating visual common sense. In Proceedings of the IEEE "
-        "International Conference on Computer Vision (ICCV), Venice, Italy, 22–29 October 2017; "
-        "pp. 5842–5850.",
-        "Tong, Z.; Song, Y.; Wang, J.; Wang, L. VideoMAE: Masked autoencoders are data-efficient "
-        "learners for self-supervised video pre-training. In Advances in Neural Information "
-        "Processing Systems 35 (NeurIPS 2022); 2022. https://doi.org/10.48550/arXiv.2203.12602",
-        "Dosovitskiy, A.; Beyer, L.; Kolesnikov, A.; Weissenborn, D.; Zhai, X.; Unterthiner, T.; "
-        "Dehghani, M.; Minderer, M.; Heigold, G.; Gelly, S.; et al. An image is worth 16×16 words: "
-        "Transformers for image recognition at scale. In Proceedings of the International Conference "
-        "on Learning Representations (ICLR), 2021. https://doi.org/10.48550/arXiv.2010.11929",
-        "Kay, W.; Carreira, J.; Simonyan, K.; Zhang, B.; Hillier, C.; Vijayanarasimhan, S.; Viola, "
-        "F.; Green, T.; Back, T.; Natsev, P.; et al. The Kinetics human action video dataset. arXiv "
-        "2017, arXiv:1705.06950. https://doi.org/10.48550/arXiv.1705.06950",
+        "Zhang, C.-L.; Wu, J.; Li, Y. ActionFormer: Localizing moments of actions with transformers. In "
+        "Computer Vision – ECCV 2022; Lecture Notes in Computer Science, Vol. 13664; Springer: Cham, "
+        "Switzerland, 2022; pp. 492–510. https://doi.org/10.1007/978-3-031-19772-7_29",
+        "Goyal, R.; Ebrahimi Kahou, S.; Michalski, V.; Materzynska, J.; Westphal, S.; Kim, H.; Haenel, V.; "
+        "Fruend, I.; Yianilos, P.; Mueller-Freitag, M.; et al. The “something something” video database "
+        "for learning and evaluating visual common sense. In Proceedings of the IEEE International "
+        "Conference on Computer Vision (ICCV), Venice, Italy, 22–29 October 2017; pp. 5842–5850.",
+        "Tong, Z.; Song, Y.; Wang, J.; Wang, L. VideoMAE: Masked autoencoders are data-efficient learners "
+        "for self-supervised video pre-training. In Advances in Neural Information Processing Systems 35 "
+        "(NeurIPS 2022); 2022. https://doi.org/10.48550/arXiv.2203.12602",
+        "Dosovitskiy, A.; Beyer, L.; Kolesnikov, A.; Weissenborn, D.; Zhai, X.; Unterthiner, T.; Dehghani, "
+        "M.; Minderer, M.; Heigold, G.; Gelly, S.; et al. An image is worth 16×16 words: Transformers for "
+        "image recognition at scale. In Proceedings of the International Conference on Learning "
+        "Representations (ICLR), 2021. https://doi.org/10.48550/arXiv.2010.11929",
+        "Kay, W.; Carreira, J.; Simonyan, K.; Zhang, B.; Hillier, C.; Vijayanarasimhan, S.; Viola, F.; "
+        "Green, T.; Back, T.; Natsev, P.; et al. The Kinetics human action video dataset. arXiv 2017, "
+        "arXiv:1705.06950. https://doi.org/10.48550/arXiv.1705.06950",
         "CVAT.ai Corporation. Computer Vision Annotation Tool (CVAT), software, 2026. "
         "https://doi.org/10.5281/zenodo.3497105",
-        "Zhang, Y.; Sun, P.; Jiang, Y.; Yu, D.; Weng, F.; Yuan, Z.; Luo, P.; Liu, W.; Wang, X. "
-        "ByteTrack: Multi-object tracking by associating every detection box. In Computer Vision – "
-        "ECCV 2022; Lecture Notes in Computer Science, Vol. 13682; Springer: Cham, Switzerland, "
-        "2022; pp. 1–21. https://doi.org/10.1007/978-3-031-20047-2_1",
+        "Wei, D.; Lim, J.; Zisserman, A.; Freeman, W.T. Learning and using the arrow of time. In "
+        "Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), Salt Lake "
+        "City, UT, USA, 18–22 June 2018; pp. 8052–8060.",
+        "Singh, B.; Marks, T.K.; Jones, M.; Tuzel, O.; Shao, M. A multi-stream bi-directional recurrent "
+        "neural network for fine-grained action detection. In Proceedings of the IEEE Conference on "
+        "Computer Vision and Pattern Recognition (CVPR), Las Vegas, NV, USA, 27–30 June 2016; "
+        "pp. 1961–1970.",
+        "Geirhos, R.; Jacobsen, J.-H.; Michaelis, C.; Zemel, R.; Brendel, W.; Bethge, M.; Wichmann, F.A. "
+        "Shortcut learning in deep neural networks. Nat. Mach. Intell. 2020, 2, 665–673. "
+        "https://doi.org/10.1038/s42256-020-00257-z",
     ]:
         para(d, ref, REFS)
 
@@ -736,13 +755,12 @@ def build(template: Path, output: Path, figures: Path) -> None:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--template", type=Path,
-                   default=Path.home() / "Downloads/jimaging-template.dot")
-    p.add_argument("--output", type=Path,
-                   default=REPO_ROOT / ".local/paper/jimaging/jimaging_pickup_putdown.docx")
+    p.add_argument("--template", type=Path, default=Path.home() / "Downloads/jimaging-template.dot")
+    p.add_argument("--output", type=Path, default=REPO_ROOT / ".local/paper/jimaging/jimaging_pickup_putdown.docx")
     p.add_argument("--figures", type=Path, default=REPO_ROOT / ".local/paper/figures")
+    p.add_argument("--revision", type=Path, default=REPO_ROOT / ".local/paper/revision")
     a = p.parse_args()
-    build(a.template, a.output, a.figures)
+    build(a.template, a.output, a.figures, a.revision)
     return 0
 
 

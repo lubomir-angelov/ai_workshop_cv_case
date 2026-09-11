@@ -304,6 +304,35 @@ trk002 pickup  16.75-19.25
 trk001 pickup  17.30-20.30
 ```
 
+## 8b. Corrections and leave-one-day-out (post-review)
+
+An external review of the manuscript found real errors, all verified against the artefacts:
+
+- **FP/hour was wrong by ~3.7×.** `infer_track_b1.py` divided by the duration of all 42
+  clips (2.31 h) instead of the evaluated split's (0.63 h test, 0.33 h val). Fixed; the
+  tables above now carry the corrected figures.
+- **Two threshold configurations were mixed** for the frozen probe: `metrics_val.json` was
+  written at default thresholds (0.647 @ 0.3) while the sweep used tuned ones (0.585). All
+  reporting now comes from one registry, `.local/paper/revision/registry.csv`.
+- "Drift exceeds the median event" was false (it is ~39% of it); "27 s × 5192 ≈ 17 h" was
+  false (that figure was for 2314 windows; 5192 gives ~39 h); "entire putdown distribution
+  below threshold" was false (one window of 57 exceeds 0.45).
+
+**Leave-one-day-out, frozen probe** (`scripts/revision_analysis.py`, selection on inner days only):
+
+| held-out day | F1@0.3 | F1@0.5 | putdown F1 | FP/h |
+|---|---|---|---|---|
+| 2026-05-20 | 0.352 | 0.176 | 0.176 | 110 |
+| 2026-05-21 | 0.387 | 0.168 | 0.070 | 145 |
+| 2026-05-22 | 0.255 | 0.157 | 0.182 | 91 |
+| 2026-05-23 | 0.468 | 0.312 | 0.158 | 99 |
+| 2026-05-26 | 0.459 | 0.324 | 0.353 | 43 |
+| **mean ± SD** | **0.384 ± 0.087** | 0.227 ± 0.084 | **0.188 ± 0.103** | 98 |
+
+The single-split validation figure (0.585) sits more than two SD above the LODO mean: it
+was optimistic. The putdown weakness recurs on every day, which strengthens the finding
+while removing any claim that it is specific to one test day.
+
 ## 9. Known limitations
 
 - **Actors are per-interaction, not per-person.** Two interactions by the same shopper are

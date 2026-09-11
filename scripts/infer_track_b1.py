@@ -282,7 +282,10 @@ def evaluate(
         )
         for row in ignore_df.itertuples()
     ]
-    clip_durations = dict(zip(clips["clip_id"], clips["duration_s"].astype(float)))
+    # Only the evaluated split's footage: fp_per_hour divides by this sum, and passing
+    # every clip's duration understated the rate ~3.7x (2.31 h against 0.63 h of test).
+    split_only = clips[clips["clip_id"].isin(set(ground_truth["clip_id"]) | set(predictions_df.get("clip_id", [])))]
+    clip_durations = dict(zip(split_only["clip_id"], split_only["duration_s"].astype(float)))
 
     results = aggregate_metrics(
         events=truth,
