@@ -15,6 +15,8 @@ rewritten to a document content type on load. Nothing else is altered.
 from __future__ import annotations
 
 import argparse
+import re
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -747,6 +749,17 @@ def build(template: Path, output: Path, figures: Path, revision: Path) -> None:
 
     output.parent.mkdir(parents=True, exist_ok=True)
     d.save(str(output))
+
+    # Versioned copy: V<n> where n is one past the highest existing V<n> in versions/.
+    # Never overwrites a previous version.
+    versions = output.parent / "versions"
+    versions.mkdir(exist_ok=True)
+    existing = [int(m.group(1)) for f in versions.glob(f"{output.stem}_V*.docx")
+                if (m := re.search(r"_V(\d+)\.docx$", f.name))]
+    n_version = max(existing, default=0) + 1
+    versioned = versions / f"{output.stem}_V{n_version}.docx"
+    shutil.copy2(output, versioned)
+    print(f"saved {versioned.name}")
     working = output.with_name("_template_working.docx")
     if working.exists():
         working.unlink()
