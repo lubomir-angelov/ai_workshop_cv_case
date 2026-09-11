@@ -170,8 +170,13 @@ def build_window_manifest(
             )
             continue
 
-        # Get events for this clip
+        # Get events for this clip. When the ground truth is actor-resolved, restrict
+        # to this candidate's actor: two actors can interact with the same shelf at
+        # overlapping times, and a clip-level lookup would stamp actor A's pickup onto
+        # a window cropped around actor B.
         clip_events = events_df[events_df["clip_id"] == clip_id]
+        if "actor_id" in clip_events.columns:
+            clip_events = clip_events[clip_events["actor_id"] == actor_id]
 
         # Get ignore intervals for this clip
         clip_ignores = ignore_intervals_df[ignore_intervals_df["clip_id"] == clip_id]

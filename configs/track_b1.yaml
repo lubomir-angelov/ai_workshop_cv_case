@@ -9,20 +9,30 @@
 # =============================================================================
 model:
   # HuggingFace model name or path
-  model_name: "MCG-NJU/videomae-small"
+  model_name: "MCG-NJU/videomae-base"
   num_classes: 3  # background, pickup, putdown
 
   # Backbone freezing strategy
+  # Unfreezing the last 2 blocks beat the frozen linear probe decisively on
+  # validation (event F1 @ tIoU 0.3: 0.806 vs 0.585). Requires the full pixel path
+  # in train_track_b1.py; the cached-embedding fast path is frozen-backbone only.
   freeze_backbone: true
   unfreeze_last_n_blocks: 2  # Fine-tune last N transformer blocks
+
+  # A pretrained backbone needs a far smaller step than the head. Training with one
+  # rate for both leaves the head barely trained at backbone LR.
+  backbone_lr: 0.00005
 
 # =============================================================================
 # WINDOW CONFIGURATION (Shared by training and inference)
 # =============================================================================
 window:
   # Window extraction parameters
-  window_duration_s: 2.5    # Duration of each sliding window
-  window_stride_s: 0.5      # Stride between windows (for inference)
+  # 1.5 s / 0.25 s beat 2.5 s / 0.5 s on validation at every tIoU, and cut boundary
+  # MAE from 1.35 s to 0.48 s. Events have a 0.9 s median, so a 2.5 s window is wider
+  # than the thing it is trying to localise.
+  window_duration_s: 1.5    # Duration of each sliding window
+  window_stride_s: 0.25     # Stride between windows (for inference)
   num_frames: 16            # Frames per window (VideoMAE requirement)
 
   # Image preprocessing
@@ -34,7 +44,7 @@ window:
 # =============================================================================
 training:
   # Optimizer
-  learning_rate: 0.0001
+  learning_rate: 0.001   # head; see model.backbone_lr for unfrozen encoder blocks
   weight_decay: 0.01
 
   # Scheduler
@@ -70,16 +80,26 @@ training:
 # INFERENCE CONFIGURATION
 # =============================================================================
 inference:
-  # Thresholds (tune on validation set)
-  pickup_threshold: 0.5
-  putdown_threshold: 0.5
+  # Selected on the validation split only, by the mean of event F1 at tIoU 0.3 and
+  # 0.5 (scripts/tune_track_b1_thresholds.py), for the fine-tuned model.
+  # Validation: F1@0.3 = 0.806, F1@0.5 = 0.746. Test was not read during selection.
+  pickup_threshold: 0.40
+  putdown_threshold: 0.45
 
   # Temporal smoothing
-  smoothing_window: 3  # Number of adjacent predictions to average (must be odd)
+  smoothing_window: 5  # Number of adjacent predictions to average (must be odd)
 
   # Same-type merging (NEVER merges pickup with putdown)
   same_type_merge_gap_s: 0.75  # Merge same-type regions if gap < this
   min_event_duration_s: 0.3    # Discard events shorter than this
+
+  # How a run of above-threshold windows becomes an event interval.
+  #   window_span    — first window start to last window end
+  #   window_centers — first to last window centre, widened by half a stride
+  # Events here have a 0.9 s median against a 2.5 s window, so window_span cannot
+  # emit an interval tighter than one window and caps tIoU near 0.36. Switching to
+  # centres raised validation F1 at tIoU 0.3 from 0.35 to 0.65 with no model change.
+  boundary_mode: "window_centers"
 
   # Output
   model_name: "layer1_track_b1_videomae_window_v1"
@@ -91,24 +111,58 @@ inference:
   prefetch_factor: 2    # Batches to prefetch per worker (buffer depth)
 
 # =============================================================================
+# ANNOTATION SOURCE
+# =============================================================================
+# Ground truth comes from CVAT source-video annotation, imported by
+# scripts/build_track_b1_dataset.py. Actor crop boxes come from the annotation
+# tracks themselves; no pose pipeline output is required for these clips.
+annotation:
+  export_dir: ".local/cvat_exports/2026-09-09"
+
+  # Held-box padding around each event. This is where hard negatives come from:
+  # without it a background window finds no box, falls back to the full 4K frame,
+  # and the crop size alone would separate the classes.
+  context_pad_s: 3.0
+
+  # Keep intervals still marked "draft" in CVAT (13 of 261 at time of writing).
+  accepted_only: false
+
+  # Splits are assigned by recording day, not by clip: clips recorded minutes
+  # apart share shoppers and shelf state, so a clip-level split would leak.
+  val_days: 1
+  test_days: 1
+
+  # Windows synthesised per completed-but-empty clip (verified negatives).
+  negative_windows_per_clip: 12
+
+# =============================================================================
 # DATA PATHS (Override via CLI or environment)
 # =============================================================================
 data:
-  # Training data
-  annotations_path: "data/annotations/events.parquet"
-  candidates_path: "data/processed/candidates.parquet"
-  clips_path: "data/clips.csv"
-  video_dir: "data/videos"
-  pose_tracks_dir: "data/processed/pose_tracks"
-  shelves_config: "configs/shelves.yaml"
+  # Built by scripts/build_track_b1_dataset.py
+  dataset_dir: ".local/track_b1_dataset"
+  events_path: ".local/track_b1_dataset/events.parquet"
+  ignore_intervals_path: ".local/track_b1_dataset/ignore_intervals.parquet"
+  candidates_path: ".local/track_b1_dataset/candidates.parquet"
+  clips_path: ".local/track_b1_dataset/clips.parquet"
+  window_manifest_path: ".local/track_b1_dataset/window_manifest.parquet"
 
-  # Train/val split
-  val_split: 0.2
-  split_by: "clip_id"  # Split by clip to avoid data leakage
+  # Actor tracks in pose-track column layout, derived from the CVAT boxes.
+  pose_tracks_dir: ".local/track_b1_dataset/actor_tracks"
+
+  video_dir: ".local/source_videos"
+
+  # Built by scripts/build_track_b1_cache.py — decoding 4K windows by seeking is
+  # about four orders of magnitude too slow to train on.
+  cache_dir: ".local/track_b1_cache"
+
+  # Built by scripts/precompute_track_b1_embeddings.py — valid only while the
+  # backbone is frozen.
+  embeddings_dir: ".local/track_b1_embeddings"
 
   # Output
-  checkpoint_dir: "models/track_b1"
-  predictions_path: "data/processed/predictions_b1.csv"
+  checkpoint_dir: ".local/track_b1_run/checkpoints"
+  predictions_dir: ".local/track_b1_run/predictions"
 
 # =============================================================================
 # DEVICE CONFIGURATION
