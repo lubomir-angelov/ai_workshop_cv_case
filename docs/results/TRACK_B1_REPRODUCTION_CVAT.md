@@ -11,7 +11,7 @@ performance. **20260526 (test) is not an untouched test set**: it was the
 | model | verdict | why |
 |---|---|---|
 | frozen head | **reproduced** | val window macro F1 0.6147 vs 0.615 (per class identical to 3 decimals); val event F1 exactly 0.585 / 0.523 (tuned) and 0.647 / 0.412 (default) when GT is counted as the CVAT branch did; test identical (0.361 / 0.278 / 0.316 / 0.133) |
-| fine-tuned (last 2 blocks) | **approximately matched at window level, event/test inconclusive** | val window macro F1 0.7348 vs 0.743 (−0.008), but the best epoch is 8 not 4 and test event F1 differs (0.529 / 0.471 vs 0.457 / 0.314). The historical run's Gate B flag (warm start kept or discarded), platform (MPS) and batch order cannot be recovered |
+| fine-tuned (last 2 blocks) | **approximately matched at window level, event/test inconclusive** | val window macro F1 0.7348 vs 0.743 (−0.008), but the best epoch is 8 not 4 and test event F1 differs (0.529 / 0.471 vs 0.457 / 0.314). A cold-head rerun rules out the warm start as the cause; run-to-run spread is as large as the gap |
 
 ## Provenance
 
@@ -122,6 +122,36 @@ The cross-day putdown collapse reproduces: on true-putdown test windows the fine
 mean p_putdown is 0.062 (historical 0.062; val 0.393), putdown window recall is 0.05 for both
 models, and fine-tuned predictions are 29 pickup / 4 putdown against a GT of 23 / 12.
 
+## Diagnostic: fine-tune without the warm-started head
+
+Tests whether the CVAT code's Gate B behaviour (re-creating the model, so a random head
+unless `--skip-tiny-overfit`) explains the fine-tune gap. Same command and settings, no
+`--init-head-from` (`$E/finetune_last2_cold`, commit `4956f77`); selection frozen in
+`$E/frozen_selection_cold.json` before one test read.
+
+| | warm head (primary) | cold head | historical |
+|---|---|---|---|
+| epoch 1 val pickup / putdown F1 | 0.617 / 0.484 | 0.565 / 0.263 | 0.635 / 0.057 |
+| best epoch / stop | 8 / 13 | 5 / 10 | 4 / — |
+| val window macro F1 (bg / pickup / putdown) | 0.7348 (0.962 / 0.711 / 0.532) | 0.7220 (0.951 / 0.684 / 0.531) | 0.743 (— / 0.736 / 0.539) |
+| val-tuned decode | 0.50 / 0.20, 3 | 0.40 / 0.35, 5 | 0.40 / 0.45, 5 (config) |
+| val event F1 @0.3 / @0.5, expanded (collapsed) | 0.771 / 0.743 (0.794 / 0.765) | 0.754 / 0.725 (0.776 / 0.746) | 0.806 / 0.746 or 0.783 / 0.638 |
+| test event F1 @0.3 / @0.5 | 0.529 / 0.471 | 0.580 / 0.435 | 0.457 / 0.314 |
+| test pickup / putdown F1 @0.5 | 0.500 / 0.375 | 0.480 / 0.316 | 0.393 / 0.000 |
+| test window macro F1 | 0.539 | 0.583 | — |
+| test mean p_putdown on true putdowns | 0.062 | 0.181 | 0.062 |
+
+**The warm start does not explain the gap.** The cold head is further from the historical
+validation result, not closer, and neither initialisation reproduces the historical test
+row (putdown 0.000). The two runs differ from each other about as much as either differs
+from history (test F1@0.5 0.471 vs 0.435, putdown window F1 0.095 vs 0.225), so
+single-run variance of the fine-tune (batch order, platform numerics) is large relative to
+the gap and a single historical run cannot be matched more closely. Resolving it would
+take several seeds per condition. Both runs keep the cross-day direction failure: putdown
+test recall at window level is 0.05 (warm) and 0.18 (cold) against 0.40-0.48 on validation.
+The cold run's collapsed-GT val F1@0.5 equals one historical value (0.746); the paired
+F1@0.3 does not (0.776 vs 0.806), so this is not read as a match.
+
 ## Differences caused by the integrated code
 
 * **Item-count expansion** (283 rows vs 259): window labels are unchanged; event recall
@@ -195,9 +225,9 @@ logs every optimizer group's learning rate per epoch.
 
 ## Open issues
 
-* Fine-tune reproduction hinges on the unrecorded historical Gate B flag; a
-  no-warm-start run (the CVAT code's behaviour without `--skip-tiny-overfit`) would test
-  that hypothesis. Not run here.
+* Fine-tune reproduction: the warm-start hypothesis was tested and rejected (see the
+  diagnostic above). The remaining gap is within the observed run-to-run spread; a
+  multi-seed comparison would be needed to say more.
 * The fine-tuned decode choice sits at the grid edge (putdown 0.20); the historical grid
   was kept.
 * The class-weight inconsistency between the two trainers is untouched, to preserve
