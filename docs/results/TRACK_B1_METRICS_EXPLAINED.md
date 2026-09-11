@@ -35,8 +35,9 @@ nothing to do with the models.
 
 **They are not the same validation *days*.** Route A picks validation days by seeded
 hash of the day string; Route B ranks days by event count and holds out the sparsest.
-The two routes are almost certainly scoring different days, so even a perfect
-reimplementation of one would not reproduce the other's number.
+Verified from the split registries (`configs/track_b1_splits.yaml`): Route A validates on
+20260526, Route B validates on 20260523 and tests on 20260526. They score different days,
+so even a perfect reimplementation of one would not reproduce the other's number.
 
 **The window populations differ in kind.** Route A's windows come from Task 5 pose
 candidates, so its background class includes long stretches of a person near a shelf
@@ -78,7 +79,8 @@ more false positives per true positive, so event-class precision falls, so macro
 falls. Route A's 92.3% background set is intrinsically harder to score well on than
 Route B's 83.7%, independent of model quality.
 
-The trivial baseline shifts too, which gives a way to correct for it.
+The trivial baseline shifts too, but subtracting it does not correct for this effect
+(see the correction note in §3).
 
 ### 2.3. Per-class F1 — where the difference actually lives
 
@@ -109,6 +111,15 @@ intersection-over-union. Only Route B produces these.
 | F1 @ tIoU 0.3, fine-tuned | 0.783 | 0.457 |
 | F1 @ tIoU 0.5, fine-tuned | 0.638 | 0.314 |
 
+**Unresolved discrepancy:** `../TRACK_B1_CVAT.md` and `configs/track_b1.yaml` report the
+fine-tuned validation event F1 as 0.806 / 0.746 (tIoU 0.3 / 0.5), this table as 0.783 /
+0.638. The run artefacts that would settle it (`.local/track_b1_finetune/predictions/
+metrics_val.json`, `chosen_thresholds_*.json`) are not available on the integration
+machine, so neither pair is verified. A plausible, unverified explanation is that 0.806 /
+0.746 are after validation-set threshold tuning and 0.783 / 0.638 before it; if so, the
+tuned pair is additionally optimistic because the thresholds were selected on the same
+validation day.
+
 **Window-level quality does not translate cleanly into event-level quality.** In Route
 B's own ablation, a model whose window-level scores were completely unchanged moved from
 event F1 0.350 to 0.647 purely by changing how intervals are built from window runs. A
@@ -126,10 +137,21 @@ spurious event during a shift.
 
 ---
 
-## 3. Correcting for class balance: lift over the trivial baseline
+## 3. Lift over the trivial baseline (does not remove class-balance effects)
 
-Since macro F1 depends on class balance, compare each model against the trivial baseline
-*of its own validation set*. The residual is the part attributable to the model.
+> **Correction (integration branch, 2026-09-11).** An earlier version of this section said
+> that subtracting the always-background macro F1 "removes the class-balance effect". It
+> does not. The trivial predictor's macro F1 is only its background F1 divided by three
+> (its event-class F1 is zero), so subtracting it removes a constant tied to the
+> background share and nothing else. The effect described in §2.2 is untouched: for a
+> classifier with fixed per-class recall and false-positive rate, event-class precision
+> is `recall·P / (recall·P + FPR·N)` and falls as negatives per positive (`N/P`) grow,
+> about 12:1 on Route A's set against about 5:1 on Route B's. The lift figures and ratios
+> below are therefore **not** balance-corrected comparisons. Prevalence-independent
+> quantities (per-class recall and false-positive rate) or scoring both models on the
+> same windows would be; see `docs/TRACK_B1_INTEGRATION.md`.
+
+The table compares each model with the trivial baseline *of its own validation set*.
 
 The trivial baseline is a predictor that always outputs background. On Route A's set that
 scores macro F1 0.320 — which independently reproduces the ~0.320 figure in their
@@ -142,13 +164,11 @@ document, confirming the calculation.
 | Route B, 1.5 s frozen | 83.7% | 0.304 | 0.615 | **+0.311** |
 | Route B, 1.5 s fine-tuned | 83.7% | 0.304 | 0.743 | **+0.439** |
 
-Normalised this way the gap widens rather than narrows: Route B's comparable
-configuration achieves **2.7×** the lift of Route A, and its best configuration **4.2×**.
-
-This correction removes the class-balance effect. It does **not** remove the other two
-differences from §1 — different validation days, and different window populations — and
-it does not touch the conditioning advantage in §4. Treat it as a better comparison than
-the raw numbers, not a fair one.
+Read this way Route B's comparable configuration shows **2.7×** the lift of Route A, and
+its best configuration **4.2×**, but per the correction above these ratios still carry
+the class-balance effect, as well as the other two differences from §1 (different
+validation days and different window populations) and the conditioning advantage in §4.
+They are not a fair comparison.
 
 ---
 
@@ -178,8 +198,9 @@ lift table in §3 should be read with that firmly in mind.
 
 **Comparable, with the §4 caveat:**
 
-- Route B's classifier extracts substantially more signal per window than Route A's,
-  and the margin survives correction for class balance (§3).
+- Route B's classifier scores substantially higher per window than Route A's. How much
+  of that is the model is not established: the §3 lift does not remove class balance,
+  and §4 conditioning is not removed at all.
 - Both routes find putdown harder than pickup, by a similar ratio. This is a property of
   the data, not of either implementation.
 - Both routes' trained models score below the trivial accuracy baseline while being
@@ -193,7 +214,9 @@ lift table in §3 should be read with that firmly in mind.
 - Generalisation to an unseen day — Route A's protocol has no test split, so the
   cross-day collapse Route B found is invisible under it. Route B's own validation-to-test
   drop, event F1 0.783 → 0.457, is the size of effect that a validation-only protocol
-  cannot see.
+  cannot see. (Route A's validation day, 20260526, *is* Route B's test day, so that day
+  was used for model selection in Route A and read twice in Route B; it is not an
+  untouched test day for combined development.)
 
 **Unresolved:**
 

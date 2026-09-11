@@ -1,5 +1,22 @@
 # Track B1: comparing two routes through the same task
 
+> **Integration note (2026-09-11)** — see [`../TRACK_B1_INTEGRATION.md`](../TRACK_B1_INTEGRATION.md).
+> Corrections to this document, verified on the merged code and data:
+> * Route A's crop was the pose person box + 15% margin only. Shelf regions were never
+>   applied (the loader read a key `configs/shelves.yaml` does not have), so
+>   "pose box ∪ shelf region" below is inaccurate.
+> * Route A's validation day (20260526) is Route B's test day. Route B's test day was
+>   therefore used for model selection and manual review by Route A.
+> * Route B's actor filter (§4.3) cannot be applied to Route A's candidates as written:
+>   CVAT track ids and pose person ids never match, and every window would silently
+>   become background. The combined pipeline associates CVAT events to pose actors first.
+> * Route A's event-level performance is now measured (§7.2 of the integration doc):
+>   the frozen-head checkpoint emits no events at the default 0.5 thresholds on its
+>   validation day, and reaches event F1 0.154 / 0.092 (tIoU 0.3 / 0.5) only with
+>   thresholds tuned on that same day.
+> * The fine-tuned validation event F1 quoted here (0.783 / 0.638) disagrees with
+>   `TRACK_B1_CVAT.md` (0.806 / 0.746); unresolved, artefacts unavailable.
+
 Two independent implementations of task_12 were trained on the same 42 human-annotated
 CVAT recordings and reached different numbers. This document explains what each did,
 where the difference comes from, and — importantly — which parts of the difference are

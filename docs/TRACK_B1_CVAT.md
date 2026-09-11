@@ -1,5 +1,17 @@
 # Track B1 on CVAT source-video annotations
 
+> **Integration note (2026-09-11).** This is the `feature/cvat_annotation` record, now
+> merged into the combined pipeline described in [`TRACK_B1_INTEGRATION.md`](TRACK_B1_INTEGRATION.md).
+> Changes that affect reading this document: `item_count = N` now yields N canonical
+> event rows (283 rows / 259 intervals, not 259 events); the dataset builder takes
+> `--input-mode annotation` and an explicit split registry; the "test" day 20260526 was
+> also the pose-route baseline's validation day, so it is not untouched; the fine-tuned
+> validation event F1 here (0.806 / 0.746) disagrees with the comparison documents
+> (0.783 / 0.638) and could not be verified because the run artefacts are not available.
+> The transformers <5 pin (§5) is no longer needed: the encoder is converted and loaded
+> strictly under either major version, and the Makefile no longer defaults to
+> `.venv-arm64`.
+
 How the Track B1 VideoMAE window classifier (task_12) is trained on the 42 clips
 annotated in CVAT, what had to be built to get there, and which choices are load-bearing.
 

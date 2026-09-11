@@ -27,3 +27,23 @@ The training history is consistent with increasing overfitting after epoch 6, bu
 - Ambiguous window labels.
 - Crops that do not clearly show the relevant interaction.
 - A small number of independent annotated events.
+
+## Verified metrics and provenance (reproduced 2026-09-11)
+
+Reproduced exactly on the integration branch with
+`scripts/diagnose_track_b1.py --legacy-data-dir .local/track_b1_data` from
+`.local/track_b1_output_human/checkpoints/best_model.pt` (best epoch 6):
+
+| validation windows | macro F1 | background F1 | pickup F1 | putdown F1 |
+|---|---|---|---|---|
+| 1,391 | 0.4240668 | 0.8982630 | 0.2612613 | 0.1126761 |
+
+Confusion matrix, rows = true, columns = predicted (background, pickup, putdown):
+background 1086 / 103 / 95; pickup 39 / 29 / 14; putdown 9 / 8 / 8.
+
+Setup: `TrainConfig` defaults (frozen VideoMAE-base, lr 1e-4), 2.5 s / 0.5 s windows,
+16 frames, crop = pose person box + 15% margin (no shelf region was applied), clip-level
+labels from `events_human.csv`, validation day 20260526 (`human_b1_2026_09_09` in
+`configs/track_b1_splits.yaml`). Clip-level labels mean overlapping actors could receive
+each other's events; with actor-resolved CVAT labels the same checkpoint scores 0.4177
+on 1,372 windows of that day. See `docs/TRACK_B1_INTEGRATION.md`.

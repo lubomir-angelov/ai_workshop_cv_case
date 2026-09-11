@@ -431,8 +431,9 @@ not `vlm_annotations/events.csv` (48, pre-dedup).
 
 ## Next
 
-- **Track B1 restore + train on this device: `docs/PLAN_1B_HUMAN.md`** (S3 download,
-  human dataset from CVAT export, VideoMAE training on human then VLM GT)
+- **Track B1: combined CVAT-supervised pipeline, `docs/TRACK_B1_INTEGRATION.md`**
+  (annotation-conditioned and deployment-input modes; commands for the next training
+  runs). Historical plan: `docs/PLAN_1B_HUMAN.md`.
 - Full-dataset inference on val split (currently only single-clip smoke tested)
 - Threshold tuning on held-out validation data
 - Track B2: cached temporal features
