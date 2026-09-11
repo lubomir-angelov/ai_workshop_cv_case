@@ -216,9 +216,7 @@ def cmd_create_tasks(args: argparse.Namespace) -> int:
     with make_api_client(args.host, args.org, resolve_token(args.token)) as api:
         project = find_project(api, args.project)
         if project is None:
-            raise SystemExit(
-                f"Project {args.project!r} not found. Run create-project first."
-            )
+            raise SystemExit(f"Project {args.project!r} not found. Run create-project first.")
 
         existing_tasks, _ = api.tasks_api.list(project_id=project.id, page_size=1000)
         existing_names = {task.name for task in existing_tasks.results}

@@ -43,19 +43,35 @@ logger = logging.getLogger("tune_track_b1_thresholds")
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset")
-    parser.add_argument("--predictions-dir", type=Path, required=True,
-                        help="directory holding window_scores_val.parquet from infer_track_b1.py")
+    parser.add_argument(
+        "--predictions-dir",
+        type=Path,
+        required=True,
+        help="directory holding window_scores_val.parquet from infer_track_b1.py",
+    )
     parser.add_argument("--split", default="val", choices=["val"])
-    parser.add_argument("--tiou", type=float, nargs="+", default=[0.3, 0.5],
-                        help="selection maximises the mean F1 over these")
-    parser.add_argument("--grid", type=float, nargs="+",
-                        default=[0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.7])
+    parser.add_argument(
+        "--tiou",
+        type=float,
+        nargs="+",
+        default=[0.3, 0.5],
+        help="selection maximises the mean F1 over these",
+    )
+    parser.add_argument(
+        "--grid",
+        type=float,
+        nargs="+",
+        default=[0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.7],
+    )
     parser.add_argument("--smoothing-windows", type=int, nargs="+", default=[3, 5])
     parser.add_argument("--same-type-merge-gap-s", type=float, default=0.75)
     parser.add_argument("--min-event-duration-s", type=float, default=0.3)
-    parser.add_argument("--boundary-mode", default="window_centers",
-                        choices=["window_span", "window_centers"],
-                        help="How a run of above-threshold windows becomes an interval")
+    parser.add_argument(
+        "--boundary-mode",
+        default="window_centers",
+        choices=["window_span", "window_centers"],
+        help="How a run of above-threshold windows becomes an interval",
+    )
     return parser.parse_args(argv)
 
 
@@ -77,7 +93,11 @@ def main(argv: list[str] | None = None) -> int:
     ignores = dataset_dir.table("ignore_intervals")
     truth = events[events["clip_id"].isin(split_clips)]
     split_ignores = ignores[ignores["clip_id"].isin(split_clips)]
-    durations = {c: float(d) for c, d in zip(clips["clip_id"], clips["duration_s"], strict=True) if c in split_clips}
+    durations = {
+        c: float(d)
+        for c, d in zip(clips["clip_id"], clips["duration_s"], strict=True)
+        if c in split_clips
+    }
 
     results: list[dict] = []
     for smoothing in args.smoothing_windows:
@@ -94,11 +114,21 @@ def main(argv: list[str] | None = None) -> int:
                     boundary_mode=args.boundary_mode,
                 )
                 predictions, _ = suppress_duplicate_events(decode_window_scores(scores, config))
-                metrics = evaluate_events(predictions, truth, split_ignores, durations, tuple(args.tiou))
-                row = {"smoothing_window": smoothing, "pickup_threshold": pickup_threshold,
-                       "putdown_threshold": putdown_threshold}
+                metrics = evaluate_events(
+                    predictions, truth, split_ignores, durations, tuple(args.tiou)
+                )
+                row = {
+                    "smoothing_window": smoothing,
+                    "pickup_threshold": pickup_threshold,
+                    "putdown_threshold": putdown_threshold,
+                }
                 for tiou in args.tiou:
-                    row.update({f"{k}@{tiou}": metrics[f"tiou@{tiou}"][k] for k in ("f1", "precision", "recall")})
+                    row.update(
+                        {
+                            f"{k}@{tiou}": metrics[f"tiou@{tiou}"][k]
+                            for k in ("f1", "precision", "recall")
+                        }
+                    )
                 row["objective"] = float(np.mean([row[f"f1@{t}"] for t in args.tiou]))
                 results.append(row)
 
@@ -109,7 +139,9 @@ def main(argv: list[str] | None = None) -> int:
     tag = f"{dataset_dir.input_mode}_{args.boundary_mode}"
     table.to_csv(args.predictions_dir / f"threshold_sweep_{args.split}_{tag}.csv", index=False)
     best = table.iloc[0]
-    print(f"\nTop 10 by mean validation F1 over tIoU {args.tiou} ({dataset_dir.input_mode} inputs):")
+    print(
+        f"\nTop 10 by mean validation F1 over tIoU {args.tiou} ({dataset_dir.input_mode} inputs):"
+    )
     print(table.head(10).to_string(index=False))
 
     chosen = {
@@ -128,7 +160,9 @@ def main(argv: list[str] | None = None) -> int:
         "selected_on": "validation split only; test not read",
     }
     # Tagged per sweep so a later sweep cannot silently overwrite an earlier selection.
-    (args.predictions_dir / f"chosen_thresholds_{tag}.json").write_text(json.dumps(chosen, indent=2))
+    (args.predictions_dir / f"chosen_thresholds_{tag}.json").write_text(
+        json.dumps(chosen, indent=2)
+    )
     print(f"\nchosen: {json.dumps(chosen, indent=2)}")
     return 0
 

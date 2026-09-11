@@ -31,17 +31,19 @@ GREEN = "#009E73"
 GREY = "#999999"
 VERMILLION = "#D55E00"
 
-plt.rcParams.update({
-    "font.family": "sans-serif",
-    "font.size": 9,
-    "axes.titlesize": 10,
-    "axes.labelsize": 9,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "figure.dpi": 300,
-    "savefig.dpi": 300,
-    "savefig.bbox": "tight",
-})
+plt.rcParams.update(
+    {
+        "font.family": "sans-serif",
+        "font.size": 9,
+        "axes.titlesize": 10,
+        "axes.labelsize": 9,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "figure.dpi": 300,
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+    }
+)
 
 
 def load(run_dir: Path, split: str) -> dict:
@@ -89,12 +91,16 @@ def fig_val_test_gap(runs: dict[str, Path], output_dir: Path) -> None:
         val, test = load(run_dir, "val"), load(run_dir, "test")
         metrics = ["$F_1$@0.3", "$F_1$@0.5", "pickup", "putdown"]
         v = [
-            val["tiou@0.3"]["f1"], val["tiou@0.5"]["f1"],
-            val["per_type"]["pickup"]["f1"], val["per_type"]["putdown"]["f1"],
+            val["tiou@0.3"]["f1"],
+            val["tiou@0.5"]["f1"],
+            val["per_type"]["pickup"]["f1"],
+            val["per_type"]["putdown"]["f1"],
         ]
         t = [
-            test["tiou@0.3"]["f1"], test["tiou@0.5"]["f1"],
-            test["per_type"]["pickup"]["f1"], test["per_type"]["putdown"]["f1"],
+            test["tiou@0.3"]["f1"],
+            test["tiou@0.5"]["f1"],
+            test["per_type"]["pickup"]["f1"],
+            test["per_type"]["putdown"]["f1"],
         ]
         x = np.arange(len(metrics))
         width = 0.36
@@ -132,8 +138,13 @@ def fig_probability_shift(dataset_dir: Path, run_dir: Path, output_dir: Path) ->
         merged = scores.merge(manifest[key + ["label_name"]], on=key, how="inner")
         putdowns = merged[merged["label_name"] == "putdown"]
         ax.hist(
-            putdowns["p_putdown"], bins=bins, density=True, histtype="step",
-            linewidth=1.8, color=colour, linestyle=style,
+            putdowns["p_putdown"],
+            bins=bins,
+            density=True,
+            histtype="step",
+            linewidth=1.8,
+            color=colour,
+            linestyle=style,
             label=f"{split} (n={len(putdowns)}, mean={putdowns['p_putdown'].mean():.2f})",
         )
 
@@ -161,9 +172,16 @@ def fig_confusion(runs: dict[str, Path], output_dir: Path) -> None:
         ax.imshow(matrix, cmap="Blues", vmin=0, vmax=max(matrix.max(), 1))
         for i in range(2):
             for j in range(2):
-                ax.text(j, i, int(matrix[i, j]), ha="center", va="center",
-                        color="white" if matrix[i, j] > matrix.max() * 0.55 else "black",
-                        fontsize=11, fontweight="bold")
+                ax.text(
+                    j,
+                    i,
+                    int(matrix[i, j]),
+                    ha="center",
+                    va="center",
+                    color="white" if matrix[i, j] > matrix.max() * 0.55 else "black",
+                    fontsize=11,
+                    fontweight="bold",
+                )
         ax.set_xticks([0, 1], types, fontsize=8)
         ax.set_yticks([0, 1], types, fontsize=8)
         ax.set_xlabel("predicted", fontsize=8)
@@ -179,7 +197,9 @@ def fig_confusion(runs: dict[str, Path], output_dir: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / ".local/paper/figures")
-    parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset_w15")
+    parser.add_argument(
+        "--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset_w15"
+    )
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -194,7 +214,7 @@ def main() -> int:
     fig_confusion(runs, args.output_dir)
 
     for path in sorted(args.output_dir.glob("*.png")):
-        print(f"wrote {path} ({path.stat().st_size/1000:.0f} kB)")
+        print(f"wrote {path} ({path.stat().st_size / 1000:.0f} kB)")
     return 0
 
 

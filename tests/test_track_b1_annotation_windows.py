@@ -162,16 +162,35 @@ def test_windows_are_labelled_per_actor_not_per_clip(clips):
     """Two actors interact at the same time; each must only see its own event."""
     candidates = pd.DataFrame(
         [
-            {"candidate_id": "c_a", "clip_id": "clip_a", "actor_id": "trk000",
-             "region_id": None, "window_start_s": 10.0, "window_end_s": 16.0},
-            {"candidate_id": "c_b", "clip_id": "clip_a", "actor_id": "trk001",
-             "region_id": None, "window_start_s": 10.0, "window_end_s": 16.0},
+            {
+                "candidate_id": "c_a",
+                "clip_id": "clip_a",
+                "actor_id": "trk000",
+                "region_id": None,
+                "window_start_s": 10.0,
+                "window_end_s": 16.0,
+            },
+            {
+                "candidate_id": "c_b",
+                "clip_id": "clip_a",
+                "actor_id": "trk001",
+                "region_id": None,
+                "window_start_s": 10.0,
+                "window_end_s": 16.0,
+            },
         ]
     )
     events = pd.DataFrame(
         [
-            {"event_id": "e1", "clip_id": "clip_a", "actor_id": "trk000",
-             "type": "pickup", "t_start": 12.0, "t_end": 14.0, "confidence": "high"},
+            {
+                "event_id": "e1",
+                "clip_id": "clip_a",
+                "actor_id": "trk000",
+                "type": "pickup",
+                "t_start": 12.0,
+                "t_end": 14.0,
+                "confidence": "high",
+            },
         ]
     )
 
@@ -187,16 +206,36 @@ def test_windows_are_labelled_per_actor_not_per_clip(clips):
 def test_adjacent_pickup_and_putdown_keep_distinct_labels(clips):
     candidates = pd.DataFrame(
         [
-            {"candidate_id": "c_a", "clip_id": "clip_a", "actor_id": "trk000",
-             "region_id": None, "window_start_s": 10.0, "window_end_s": 20.0},
+            {
+                "candidate_id": "c_a",
+                "clip_id": "clip_a",
+                "actor_id": "trk000",
+                "region_id": None,
+                "window_start_s": 10.0,
+                "window_end_s": 20.0,
+            },
         ]
     )
     events = pd.DataFrame(
         [
-            {"event_id": "e1", "clip_id": "clip_a", "actor_id": "trk000",
-             "type": "pickup", "t_start": 12.0, "t_end": 13.0, "confidence": "high"},
-            {"event_id": "e2", "clip_id": "clip_a", "actor_id": "trk000",
-             "type": "putdown", "t_start": 16.0, "t_end": 17.0, "confidence": "high"},
+            {
+                "event_id": "e1",
+                "clip_id": "clip_a",
+                "actor_id": "trk000",
+                "type": "pickup",
+                "t_start": 12.0,
+                "t_end": 13.0,
+                "confidence": "high",
+            },
+            {
+                "event_id": "e2",
+                "clip_id": "clip_a",
+                "actor_id": "trk000",
+                "type": "putdown",
+                "t_start": 16.0,
+                "t_end": 17.0,
+                "confidence": "high",
+            },
         ]
     )
 
@@ -211,14 +250,27 @@ def test_adjacent_pickup_and_putdown_keep_distinct_labels(clips):
 def test_low_confidence_events_are_downweighted(clips):
     candidates = pd.DataFrame(
         [
-            {"candidate_id": "c_a", "clip_id": "clip_a", "actor_id": "trk000",
-             "region_id": None, "window_start_s": 10.0, "window_end_s": 16.0},
+            {
+                "candidate_id": "c_a",
+                "clip_id": "clip_a",
+                "actor_id": "trk000",
+                "region_id": None,
+                "window_start_s": 10.0,
+                "window_end_s": 16.0,
+            },
         ]
     )
     events = pd.DataFrame(
         [
-            {"event_id": "e1", "clip_id": "clip_a", "actor_id": "trk000",
-             "type": "pickup", "t_start": 12.0, "t_end": 14.0, "confidence": "low"},
+            {
+                "event_id": "e1",
+                "clip_id": "clip_a",
+                "actor_id": "trk000",
+                "type": "pickup",
+                "t_start": 12.0,
+                "t_end": 14.0,
+                "confidence": "low",
+            },
         ]
     )
 

@@ -62,7 +62,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset")
     parser.add_argument("--video-dir", type=Path, default=REPO_ROOT / ".local/source_videos")
     parser.add_argument("--cache-dir", type=Path, default=REPO_ROOT / ".local/track_b1_cache")
-    parser.add_argument("--frame-cache-dir", type=Path, default=REPO_ROOT / ".local/track_b1_frame_cache")
+    parser.add_argument(
+        "--frame-cache-dir", type=Path, default=REPO_ROOT / ".local/track_b1_frame_cache"
+    )
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / ".local/track_b1_run")
 
     parser.add_argument("--model-name", default="MCG-NJU/videomae-base")
@@ -74,28 +76,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--unfreeze-last-n-blocks", type=int, default=0)
     parser.add_argument(
-        "--backbone-lr", type=float, default=None,
+        "--backbone-lr",
+        type=float,
+        default=None,
         help="Learning rate for unfrozen encoder blocks (default: same as the head). "
-             "A pretrained backbone needs a much smaller step than an untrained head.",
+        "A pretrained backbone needs a much smaller step than an untrained head.",
     )
     parser.add_argument(
-        "--init-head-from", type=Path, default=None,
+        "--init-head-from",
+        type=Path,
+        default=None,
         help="Warm-start the head from a head_best.pt produced by train_track_b1_head.py, "
-             "so fine-tuning starts from a head that already works rather than from noise.",
+        "so fine-tuning starts from a head that already works rather than from noise.",
     )
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--skip-tiny-overfit", action="store_true")
     parser.add_argument(
-        "--balanced-sampler", action="store_true",
+        "--balanced-sampler",
+        action="store_true",
         help="Oversample event windows instead of relying on class weights alone",
     )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     args = parse_args(argv)
     torch.manual_seed(args.seed)
 
@@ -109,14 +118,20 @@ def main(argv: list[str] | None = None) -> int:
 
     def open_split(split_manifest: pd.DataFrame):
         return open_window_dataset(
-            dataset_dir, split_manifest, args.video_dir, cache_dir=args.cache_dir,
+            dataset_dir,
+            split_manifest,
+            args.video_dir,
+            cache_dir=args.cache_dir,
             frame_cache_dir=args.frame_cache_dir,
         )
 
     train_dataset = open_split(train_manifest)
     val_dataset = open_split(val_manifest)
-    logger.info("input mode %s, preprocessing %s", dataset_dir.input_mode,
-                dataset_dir.metadata["preprocessing"])
+    logger.info(
+        "input mode %s, preprocessing %s",
+        dataset_dir.input_mode,
+        dataset_dir.metadata["preprocessing"],
+    )
 
     sampler, shuffle = None, True
     if args.balanced_sampler:
@@ -131,11 +146,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.num_workers:
         workers.update(multiprocessing_context="spawn", persistent_workers=True)
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=shuffle, sampler=sampler,
-        pin_memory=False, drop_last=False, **workers,
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=shuffle,
+        sampler=sampler,
+        pin_memory=False,
+        drop_last=False,
+        **workers,
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=False, **workers,
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        pin_memory=False,
+        **workers,
     )
 
     device = _resolve_device(args.device)
@@ -156,13 +180,17 @@ def main(argv: list[str] | None = None) -> int:
         model.head.load_state_dict(checkpoint["head_state_dict"])
         head_mode = checkpoint.get("input_mode")
         if head_mode != dataset_dir.input_mode:
-            logger.warning("head was trained in input mode %s, fine-tuning in %s",
-                           head_mode, dataset_dir.input_mode)
+            logger.warning(
+                "head was trained in input mode %s, fine-tuning in %s",
+                head_mode,
+                dataset_dir.input_mode,
+            )
         if checkpoint.get("encoder_weights_sha256") not in (None, model.encoder_weights_sha256):
             raise ValueError("warm-start head was trained on a different pretrained encoder")
         logger.info(
             "warm-started head from %s (val macro F1 %.4f)",
-            args.init_head_from, checkpoint.get("val_f1_macro", float("nan")),
+            args.init_head_from,
+            checkpoint.get("val_f1_macro", float("nan")),
         )
 
     config = TrainConfig(

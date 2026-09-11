@@ -419,7 +419,10 @@ def _parameter_groups(model: nn.Module, config: TrainConfig) -> list[dict]:
 
     logger.info(
         "Discriminative learning rates: head %d tensors @ %g, backbone %d tensors @ %g",
-        len(head_params), config.learning_rate, len(backbone_params), config.backbone_lr,
+        len(head_params),
+        config.learning_rate,
+        len(backbone_params),
+        config.backbone_lr,
     )
     return [
         {"params": head_params, "lr": config.learning_rate},
@@ -532,9 +535,7 @@ def run_tiny_overfit_test(
         if (step + 1) % 20 == 0:
             predictions = logits.argmax(dim=-1)
             accuracy = (predictions == labels).float().mean().item()
-            logger.info(
-                f"Tiny overfit step {step + 1}: loss={loss.item():.4f} acc={accuracy:.4f}"
-            )
+            logger.info(f"Tiny overfit step {step + 1}: loss={loss.item():.4f} acc={accuracy:.4f}")
 
         # Success condition
         if loss.item() < config.tiny_overfit_target_loss:
@@ -817,11 +818,13 @@ def train(
         )
 
         # Record history
-        training_history.append({
-            "epoch": epoch + 1,
-            "train": train_metrics,
-            "val": val_metrics.to_dict(),
-        })
+        training_history.append(
+            {
+                "epoch": epoch + 1,
+                "train": train_metrics,
+                "val": val_metrics.to_dict(),
+            }
+        )
 
         # Check if best
         should_stop = early_stopping(val_metrics.f1_macro)
@@ -944,16 +947,22 @@ def main(
     if ignore_intervals_path is not None:
         ignore_intervals_df = pd.read_parquet(ignore_intervals_path)
     else:
-        ignore_intervals_df = pd.DataFrame(
-            columns=["clip_id", "t_start", "t_end", "reason"]
-        )
+        ignore_intervals_df = pd.DataFrame(columns=["clip_id", "t_start", "t_end", "reason"])
 
     # Load shelf regions
     shelf_regions = load_shelf_regions(Path(shelf_regions_path))
 
     # Window config
-    window_keys = ("window_duration_s", "window_stride_s", "num_frames", "image_size",
-                   "crop_margin", "crop_scope", "resize_interpolation", "include_shelf_region")
+    window_keys = (
+        "window_duration_s",
+        "window_stride_s",
+        "num_frames",
+        "image_size",
+        "crop_margin",
+        "crop_scope",
+        "resize_interpolation",
+        "include_shelf_region",
+    )
     window_config = WindowConfig(
         **{k: config_dict[k] for k in window_keys if config_path and k in config_dict}
     )
@@ -985,8 +994,11 @@ def main(
         raise ValueError("No validation samples found!")
 
     # Create dataloaders
-    logger.info("Creating dataloaders: workers=%d, frame_cache=%s",
-                config.num_workers, config.frame_cache_dir if config.cache_frames else "disabled")
+    logger.info(
+        "Creating dataloaders: workers=%d, frame_cache=%s",
+        config.num_workers,
+        config.frame_cache_dir if config.cache_frames else "disabled",
+    )
     train_loader, val_loader = create_dataloaders(
         train_manifest=train_manifest,
         val_manifest=val_manifest,
@@ -1007,9 +1019,12 @@ def main(
     # Create model
     logger.info("Creating model...")
     device = torch.device(
-        "cuda" if config.device == "auto" and torch.cuda.is_available()
-        else "mps" if config.device == "auto" and torch.backends.mps.is_available()
-        else "cpu" if config.device == "auto"
+        "cuda"
+        if config.device == "auto" and torch.cuda.is_available()
+        else "mps"
+        if config.device == "auto" and torch.backends.mps.is_available()
+        else "cpu"
+        if config.device == "auto"
         else config.device
     )
 
@@ -1037,6 +1052,7 @@ def main(
     output_path.mkdir(parents=True, exist_ok=True)
 
     import json
+
     with open(output_path / "training_results.json", "w") as f:
         json.dump(results, f, indent=2)
 

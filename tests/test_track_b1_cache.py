@@ -82,7 +82,13 @@ def test_crop_box_unions_boxes_over_the_candidate_span():
 
 def test_crop_box_falls_back_to_the_full_frame_without_boxes():
     empty = pd.DataFrame(
-        columns=["timestamp_s", "person_bbox_x1", "person_bbox_y1", "person_bbox_x2", "person_bbox_y2"]
+        columns=[
+            "timestamp_s",
+            "person_bbox_x1",
+            "person_bbox_y1",
+            "person_bbox_x2",
+            "person_bbox_y2",
+        ]
     )
 
     assert candidate_crop_box(empty, 0.0, 1.0, 0.15, (3840, 2160)) == (0, 0, 3840, 2160)
@@ -92,8 +98,10 @@ def test_crop_box_margin_is_clamped_to_the_frame():
     track = pd.DataFrame(
         {
             "timestamp_s": [1.0],
-            "person_bbox_x1": [0.0], "person_bbox_y1": [0.0],
-            "person_bbox_x2": [100.0], "person_bbox_y2": [100.0],
+            "person_bbox_x1": [0.0],
+            "person_bbox_y1": [0.0],
+            "person_bbox_x2": [100.0],
+            "person_bbox_y2": [100.0],
         }
     )
 
@@ -110,14 +118,19 @@ def test_crop_box_margin_is_clamped_to_the_frame():
 
 def test_frame_position_is_relative_and_clamped():
     entry = CachedCandidate(
-        candidate_id="c", clip_id="clip_a", actor_id="trk000",
-        start_frame=100, n_frames=50, fps=FPS, crop_box=(0, 0, 8, 8),
+        candidate_id="c",
+        clip_id="clip_a",
+        actor_id="trk000",
+        start_frame=100,
+        n_frames=50,
+        fps=FPS,
+        crop_box=(0, 0, 8, 8),
         array_path=Path("unused.npy"),
     )
 
     assert entry.frame_position(100) == 0
     assert entry.frame_position(120) == 20
-    assert entry.frame_position(50) == 0     # before the cached span
+    assert entry.frame_position(50) == 0  # before the cached span
     assert entry.frame_position(9999) == 49  # after it
 
 
@@ -133,8 +146,13 @@ def test_load_cache_index_skips_entries_without_an_array(tmp_path: Path):
     (tmp_path / "orphan.json").write_text(
         json.dumps(
             {
-                "cache_version": CACHE_VERSION, "candidate_id": "orphan", "clip_id": "clip_a",
-                "actor_id": "trk000", "start_frame": 0, "n_frames": 10, "fps": FPS,
+                "cache_version": CACHE_VERSION,
+                "candidate_id": "orphan",
+                "clip_id": "clip_a",
+                "actor_id": "trk000",
+                "start_frame": 0,
+                "n_frames": 10,
+                "fps": FPS,
                 "crop_box": [0, 0, 8, 8],
             }
         )

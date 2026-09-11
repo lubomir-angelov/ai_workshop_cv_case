@@ -84,19 +84,30 @@ def gate_b(head: nn.Module, features: torch.Tensor, labels: torch.Tensor, device
     logger.info(
         "GATE B %s: %d samples, labels=%s, loss=%.4f acc=%.3f",
         "PASSED" if passed else "FAILED",
-        len(picked), torch.bincount(y, minlength=3).tolist(), loss.item(), accuracy,
+        len(picked),
+        torch.bincount(y, minlength=3).tolist(),
+        loss.item(),
+        accuracy,
     )
     return passed
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset",
-                        help="labels/splits come from this dataset's window manifest")
-    parser.add_argument("--embeddings-dir", type=Path, default=None,
-                        help="default: <dataset-dir>/embeddings")
-    parser.add_argument("--model-name", default="MCG-NJU/videomae-base",
-                        help="pretrained encoder the embeddings must come from")
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        default=REPO_ROOT / ".local/track_b1_dataset",
+        help="labels/splits come from this dataset's window manifest",
+    )
+    parser.add_argument(
+        "--embeddings-dir", type=Path, default=None, help="default: <dataset-dir>/embeddings"
+    )
+    parser.add_argument(
+        "--model-name",
+        default="MCG-NJU/videomae-base",
+        help="pretrained encoder the embeddings must come from",
+    )
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / ".local/track_b1_run")
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -111,7 +122,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     args = parse_args(argv)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -124,8 +137,11 @@ def main(argv: list[str] | None = None) -> int:
     embeddings, embedding_metadata = load_embeddings_for(
         manifest, embeddings_dir, dataset_dir.metadata["preprocessing"], encoder_sha
     )
-    logger.info("input mode %s: %d windows with cached frozen-encoder features",
-                dataset_dir.input_mode, len(manifest))
+    logger.info(
+        "input mode %s: %d windows with cached frozen-encoder features",
+        dataset_dir.input_mode,
+        len(manifest),
+    )
 
     device = torch.device(args.device)
     features = torch.from_numpy(embeddings).float()
@@ -135,16 +151,24 @@ def main(argv: list[str] | None = None) -> int:
     train_mask = (manifest["split"] == "train").to_numpy()
     val_mask = (manifest["split"] == "val").to_numpy()
 
-    x_train, y_train, w_train = features[train_mask].to(device), labels[train_mask].to(device), weights[train_mask].to(device)
+    x_train, y_train, w_train = (
+        features[train_mask].to(device),
+        labels[train_mask].to(device),
+        weights[train_mask].to(device),
+    )
     x_val, y_val = features[val_mask].to(device), labels[val_mask].to(device)
     logger.info("train=%d val=%d hidden_dim=%d", len(x_train), len(x_val), features.shape[1])
 
-    if not args.skip_gate_b and not gate_b(nn.Identity(), features[train_mask], labels[train_mask], device):
+    if not args.skip_gate_b and not gate_b(
+        nn.Identity(), features[train_mask], labels[train_mask], device
+    ):
         logger.error("Gate B failed; not proceeding to full training")
         return 1
 
     head = ClassificationHead(features.shape[1], 3, dropout=args.dropout).to(device)
-    optimizer = torch.optim.AdamW(head.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(
+        head.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     counts = torch.bincount(y_train, minlength=3).float().clamp(min=1)
@@ -172,7 +196,14 @@ def main(argv: list[str] | None = None) -> int:
         with torch.no_grad():
             val_predicted = head(x_val).argmax(dim=-1)
         f1, per_class = macro_f1(y_val.cpu().numpy(), val_predicted.cpu().numpy())
-        history.append({"epoch": epoch, "train_loss": epoch_loss / len(order), "val_f1_macro": f1, **per_class})
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": epoch_loss / len(order),
+                "val_f1_macro": f1,
+                **per_class,
+            }
+        )
 
         if f1 > best_f1 + 1e-4:
             best_f1, best_epoch, since_improved = f1, epoch, 0
@@ -183,7 +214,11 @@ def main(argv: list[str] | None = None) -> int:
         if epoch % 25 == 0 or epoch == 1:
             logger.info(
                 "epoch %d: loss=%.4f val_f1=%.4f (pickup=%.3f putdown=%.3f)",
-                epoch, epoch_loss / len(order), f1, per_class["pickup"], per_class["putdown"],
+                epoch,
+                epoch_loss / len(order),
+                f1,
+                per_class["pickup"],
+                per_class["putdown"],
             )
         if since_improved >= args.patience:
             logger.info("early stopping at epoch %d (best %d)", epoch, best_epoch)
@@ -208,21 +243,33 @@ def main(argv: list[str] | None = None) -> int:
         "encoder_weights_sha256": encoder_sha,
     }
     torch.save(
-        {"head_state_dict": best_state, "epoch": best_epoch, "val_f1_macro": final_f1, **provenance},
+        {
+            "head_state_dict": best_state,
+            "epoch": best_epoch,
+            "val_f1_macro": final_f1,
+            **provenance,
+        },
         checkpoint_dir / "head_best.pt",
     )
     torch.save(
-        {"head_state_dict": final_state, "epoch": history[-1]["epoch"],
-         "val_f1_macro": history[-1]["val_f1_macro"], **provenance},
+        {
+            "head_state_dict": final_state,
+            "epoch": history[-1]["epoch"],
+            "val_f1_macro": history[-1]["val_f1_macro"],
+            **provenance,
+        },
         checkpoint_dir / "head_final.pt",
     )
     pd.DataFrame(history).to_csv(args.output_dir / "head_training_history.csv", index=False)
     np.save(args.output_dir / "val_probs.npy", val_probs)
     # Keyed per-window export: provenance survives any reordering of the manifest.
     val_rows = manifest[val_mask].reset_index(drop=True)
-    val_rows = val_rows.assign(pred_id=val_probs.argmax(axis=1),
-                               p_background=val_probs[:, 0], p_pickup=val_probs[:, 1],
-                               p_putdown=val_probs[:, 2])
+    val_rows = val_rows.assign(
+        pred_id=val_probs.argmax(axis=1),
+        p_background=val_probs[:, 0],
+        p_pickup=val_probs[:, 1],
+        p_putdown=val_probs[:, 2],
+    )
     val_rows.to_csv(args.output_dir / "val_window_predictions.csv", index=False)
     (args.output_dir / "head_results.json").write_text(
         json.dumps(

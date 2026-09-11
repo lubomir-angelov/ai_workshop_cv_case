@@ -90,9 +90,7 @@ def test_parse_archive_derives_timebase_from_clip_stem(single_pickup: Path):
 
 
 def test_probed_video_fps_overrides_the_stem_estimate(single_pickup: Path, monkeypatch):
-    monkeypatch.setattr(
-        "pickup_putdown.annotation.cvat_import.probe_fps", lambda path: 20.0
-    )
+    monkeypatch.setattr("pickup_putdown.annotation.cvat_import.probe_fps", lambda path: 20.0)
     clip = parse_archive(next(single_pickup.glob("*.zip")), video_dir=single_pickup)
 
     assert clip.fps == 20.0

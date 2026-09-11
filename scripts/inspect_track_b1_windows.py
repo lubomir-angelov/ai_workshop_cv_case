@@ -69,16 +69,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset")
     parser.add_argument("--video-dir", type=Path, default=REPO_ROOT / ".local/source_videos")
-    parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / ".local/track_b1_inspection")
+    parser.add_argument(
+        "--output-dir", type=Path, default=REPO_ROOT / ".local/track_b1_inspection"
+    )
     parser.add_argument("--cache-dir", type=Path, default=REPO_ROOT / ".local/track_b1_cache")
-    parser.add_argument("--frame-cache-dir", type=Path, default=None,
-                        help="deployment mode: read/write this per-window cache (default: decode)")
+    parser.add_argument(
+        "--frame-cache-dir",
+        type=Path,
+        default=None,
+        help="deployment mode: read/write this per-window cache (default: decode)",
+    )
     parser.add_argument("--per-class", type=int, default=4, help="Windows to render per label")
     parser.add_argument("--split", default="train")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--compare-source", action="store_true",
-                        help="annotation mode: also decode each window from the source video "
-                             "and fail if it differs from the cached input training uses")
+    parser.add_argument(
+        "--compare-source",
+        action="store_true",
+        help="annotation mode: also decode each window from the source video "
+        "and fail if it differs from the cached input training uses",
+    )
     return parser.parse_args(argv)
 
 
@@ -104,7 +113,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # The same dataset path training uses, so the grids show the real model input.
     dataset = open_window_dataset(
-        dataset_dir, picked, args.video_dir, cache_dir=args.cache_dir,
+        dataset_dir,
+        picked,
+        args.video_dir,
+        cache_dir=args.cache_dir,
         frame_cache_dir=args.frame_cache_dir,
     )
     source = None
@@ -145,15 +157,19 @@ def main(argv: list[str] | None = None) -> int:
     ]
     cv2.imwrite(str(args.output_dir / "contact_sheet.png"), np.vstack(padded))
 
-    print(f"\nWrote {len(grids)} grids + contact_sheet.png to {args.output_dir} "
-          f"({dataset_dir.input_mode} inputs)")
+    print(
+        f"\nWrote {len(grids)} grids + contact_sheet.png to {args.output_dir} "
+        f"({dataset_dir.input_mode} inputs)"
+    )
     if source is not None:
         print(f"max |cached input - fresh source decode| over all windows: {worst_difference:.0f}")
         if worst_difference > 0:
             logger.error("cached inputs differ from the source decode; rebuild the cache")
             return 1
-    print("Check: frames advance left-to-right, the actor stays in crop, "
-          "and the label matches what the hands do.")
+    print(
+        "Check: frames advance left-to-right, the actor stays in crop, "
+        "and the label matches what the hands do."
+    )
     return 0
 
 

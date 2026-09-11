@@ -33,8 +33,13 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 CANDIDATE_COLUMNS = [
-    "candidate_id", "clip_id", "actor_id", "region_id",
-    "window_start_s", "window_end_s", "source",
+    "candidate_id",
+    "clip_id",
+    "actor_id",
+    "region_id",
+    "window_start_s",
+    "window_end_s",
+    "source",
 ]
 
 
@@ -131,10 +136,14 @@ def build_verified_negative_candidates(
     """
     box_cols = ["person_bbox_x1", "person_bbox_y1", "person_bbox_x2", "person_bbox_y2"]
 
-    pool = pd.concat(
-        [df[box_cols] for df in actor_tracks.values() if not df.empty],
-        ignore_index=True,
-    ) if any(not df.empty for df in actor_tracks.values()) else pd.DataFrame(columns=box_cols)
+    pool = (
+        pd.concat(
+            [df[box_cols] for df in actor_tracks.values() if not df.empty],
+            ignore_index=True,
+        )
+        if any(not df.empty for df in actor_tracks.values())
+        else pd.DataFrame(columns=box_cols)
+    )
 
     empty_clips = [clip_id for clip_id, df in actor_tracks.items() if df.empty]
     if not empty_clips or pool.empty:
@@ -199,7 +208,8 @@ def build_verified_negative_candidates(
     candidates = pd.DataFrame(rows, columns=CANDIDATE_COLUMNS)
     logger.info(
         "Built %d verified-negative candidates across %d cleared clips",
-        len(candidates), len(synthetic_tracks),
+        len(candidates),
+        len(synthetic_tracks),
     )
     return candidates, synthetic_tracks
 
@@ -228,7 +238,8 @@ def build_candidate_table(
     for clip_id, df in synthetic.items():
         existing = tracks.get(clip_id)
         tracks[clip_id] = (
-            df if existing is None or existing.empty
+            df
+            if existing is None or existing.empty
             else pd.concat([existing, df], ignore_index=True)
         )
 
@@ -247,10 +258,10 @@ def summarize_manifest(manifest: pd.DataFrame) -> pd.DataFrame:
     """Label counts per split, for the record and for spotting a degenerate build."""
     if manifest.empty:
         return pd.DataFrame()
-    return (
-        manifest.pivot_table(
-            index="split", columns="label_name", values="sample_id",
-            aggfunc="count", fill_value=0,
-        )
-        .assign(total=lambda df: df.sum(axis=1))
-    )
+    return manifest.pivot_table(
+        index="split",
+        columns="label_name",
+        values="sample_id",
+        aggfunc="count",
+        fill_value=0,
+    ).assign(total=lambda df: df.sum(axis=1))

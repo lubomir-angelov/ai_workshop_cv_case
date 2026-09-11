@@ -66,20 +66,33 @@ def section(title: str, runs: list[tuple[str, dict | None]]) -> str:
         row("F1 @ tIoU 0.3", lambda m: m.get("tiou@0.3", {}).get("f1")),
         row("precision @ 0.3", lambda m: m.get("tiou@0.3", {}).get("precision")),
         row("recall @ 0.3", lambda m: m.get("tiou@0.3", {}).get("recall")),
-        row("tp / fp / fn @ 0.3", lambda m: "{} / {} / {}".format(
-            m.get("tiou@0.3", {}).get("tp"), m.get("tiou@0.3", {}).get("fp"),
-            m.get("tiou@0.3", {}).get("fn"))),
+        row(
+            "tp / fp / fn @ 0.3",
+            lambda m: "{} / {} / {}".format(
+                m.get("tiou@0.3", {}).get("tp"),
+                m.get("tiou@0.3", {}).get("fp"),
+                m.get("tiou@0.3", {}).get("fn"),
+            ),
+        ),
         row("F1 @ tIoU 0.5", lambda m: m.get("tiou@0.5", {}).get("f1")),
         row("precision @ 0.5", lambda m: m.get("tiou@0.5", {}).get("precision")),
         row("recall @ 0.5", lambda m: m.get("tiou@0.5", {}).get("recall")),
         row("pickup F1", lambda m: m.get("per_type", {}).get("pickup", {}).get("f1")),
-        row("pickup P / R", lambda m: "{} / {}".format(
-            fmt(m.get("per_type", {}).get("pickup", {}).get("precision")),
-            fmt(m.get("per_type", {}).get("pickup", {}).get("recall")))),
+        row(
+            "pickup P / R",
+            lambda m: "{} / {}".format(
+                fmt(m.get("per_type", {}).get("pickup", {}).get("precision")),
+                fmt(m.get("per_type", {}).get("pickup", {}).get("recall")),
+            ),
+        ),
         row("putdown F1", lambda m: m.get("per_type", {}).get("putdown", {}).get("f1")),
-        row("putdown P / R", lambda m: "{} / {}".format(
-            fmt(m.get("per_type", {}).get("putdown", {}).get("precision")),
-            fmt(m.get("per_type", {}).get("putdown", {}).get("recall")))),
+        row(
+            "putdown P / R",
+            lambda m: "{} / {}".format(
+                fmt(m.get("per_type", {}).get("putdown", {}).get("precision")),
+                fmt(m.get("per_type", {}).get("putdown", {}).get("recall")),
+            ),
+        ),
         row("mAP @ 0.3", lambda m: m.get("mAP", {}).get("mAP@0.3")),
         row("mAP avg", lambda m: m.get("mAP", {}).get("mAP_avg")),
         row("start MAE (s)", lambda m: m.get("start_mae_s")),
@@ -93,14 +106,18 @@ def section(title: str, runs: list[tuple[str, dict | None]]) -> str:
             continue
         confusion = metrics.get("confusion") or {}
         if confusion:
-            out.append(f"Confusion @ tIoU {metrics.get('confusion_tiou')} — {name} "
-                       "(rows = ground truth, columns = prediction):")
+            out.append(
+                f"Confusion @ tIoU {metrics.get('confusion_tiou')} — {name} "
+                "(rows = ground truth, columns = prediction):"
+            )
             types = sorted(confusion)
             out.append("")
-            out.append(table(
-                [[t] + [str(confusion[t].get(c, 0)) for c in types] for t in types],
-                ["truth \\ pred", *types],
-            ))
+            out.append(
+                table(
+                    [[t] + [str(confusion[t].get(c, 0)) for c in types] for t in types],
+                    ["truth \\ pred", *types],
+                )
+            )
             out.append("")
     return "\n".join(out)
 
@@ -114,10 +131,12 @@ def main() -> int:
 
     parts = ["# Track B1 results", ""]
     for split in ("val", "test"):
-        parts.append(section(
-            f"{split} split",
-            [(name, load(path, split)) for name, path in runs],
-        ))
+        parts.append(
+            section(
+                f"{split} split",
+                [(name, load(path, split)) for name, path in runs],
+            )
+        )
 
     parts.append("Source files:")
     for name, path in runs:

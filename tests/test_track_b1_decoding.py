@@ -35,8 +35,11 @@ def _series(hot_centers: set[float], klass: str = "pickup") -> list[WindowPredic
         hot = round(float(center), 3) in hot_centers
         score = 0.9 if hot else 0.05
         windows.append(
-            _window(float(center), pickup=score if klass == "pickup" else 0.0,
-                    putdown=score if klass == "putdown" else 0.0)
+            _window(
+                float(center),
+                pickup=score if klass == "pickup" else 0.0,
+                putdown=score if klass == "putdown" else 0.0,
+            )
         )
     return windows
 
@@ -49,7 +52,10 @@ def _series(hot_centers: set[float], klass: str = "pickup") -> list[WindowPredic
 def test_window_span_mode_cannot_be_tighter_than_one_window():
     """The original behaviour, kept as the default; this is its structural limit."""
     regions = _find_regions_above_threshold(
-        _series({10.0}), class_idx=1, threshold=0.5, event_type="pickup",
+        _series({10.0}),
+        class_idx=1,
+        threshold=0.5,
+        event_type="pickup",
         boundary_mode="window_span",
     )
 
@@ -73,8 +79,12 @@ def test_centre_mode_produces_a_much_tighter_interval():
 
 def test_centre_mode_respects_the_minimum_duration_floor():
     regions = _find_regions_above_threshold(
-        _series({10.0}), 1, 0.5, "pickup",
-        boundary_mode="window_centers", min_duration_s=1.0,
+        _series({10.0}),
+        1,
+        0.5,
+        "pickup",
+        boundary_mode="window_centers",
+        min_duration_s=1.0,
     )
 
     assert regions[0].end_s - regions[0].start_s == pytest.approx(1.0)
@@ -137,8 +147,11 @@ def test_adjacent_pickup_and_putdown_are_never_merged():
         _window(11.5, putdown=0.9),
     ]
     config = InferenceConfig(
-        pickup_threshold=0.5, putdown_threshold=0.5, smoothing_window=1,
-        boundary_mode="window_centers", same_type_merge_gap_s=5.0,
+        pickup_threshold=0.5,
+        putdown_threshold=0.5,
+        smoothing_window=1,
+        boundary_mode="window_centers",
+        same_type_merge_gap_s=5.0,
     )
 
     regions = detect_score_peaks(windows, config)
@@ -168,11 +181,16 @@ def test_same_type_regions_beyond_the_gap_stay_separate():
 
 def test_one_candidate_can_emit_several_ordered_events():
     windows = [
-        _window(9.0, pickup=0.9), _window(11.0, putdown=0.9), _window(13.0, pickup=0.9),
+        _window(9.0, pickup=0.9),
+        _window(11.0, putdown=0.9),
+        _window(13.0, pickup=0.9),
     ]
     config = InferenceConfig(
-        pickup_threshold=0.5, putdown_threshold=0.5, smoothing_window=1,
-        boundary_mode="window_centers", same_type_merge_gap_s=0.5,
+        pickup_threshold=0.5,
+        putdown_threshold=0.5,
+        smoothing_window=1,
+        boundary_mode="window_centers",
+        same_type_merge_gap_s=0.5,
     )
 
     merged = merge_same_type_regions(

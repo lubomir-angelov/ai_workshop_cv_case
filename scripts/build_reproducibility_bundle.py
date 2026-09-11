@@ -49,8 +49,12 @@ def write_split_listing(dataset_dir: Path, out_path: Path) -> pd.DataFrame:
     events = pd.read_parquet(dataset_dir / "events.parquet")
 
     counts = (
-        events.groupby(["clip_id", "type"]).size().unstack(fill_value=0).reindex(clips["clip_id"])
-        .fillna(0).astype(int)
+        events.groupby(["clip_id", "type"])
+        .size()
+        .unstack(fill_value=0)
+        .reindex(clips["clip_id"])
+        .fillna(0)
+        .astype(int)
     )
     table = clips[["clip_id", "recording_day", "split", "fps", "n_frames", "duration_s"]].copy()
     table = table.join(counts, on="clip_id")
@@ -74,8 +78,13 @@ def write_split_listing(dataset_dir: Path, out_path: Path) -> pd.DataFrame:
             f"| {int(part.get('putdown', pd.Series(dtype=int)).sum())} |"
         )
 
-    lines += ["", "## Per-clip assignment", "",
-              "| clip_id | day | split | pickup | putdown | duration (s) |", "|---|---|---|---|---|---|"]
+    lines += [
+        "",
+        "## Per-clip assignment",
+        "",
+        "| clip_id | day | split | pickup | putdown | duration (s) |",
+        "|---|---|---|---|---|---|",
+    ]
     for row in table.itertuples():
         lines.append(
             f"| {row.clip_id} | {row.recording_day} | {row.split} "
@@ -91,15 +100,17 @@ def write_source_manifest(clips: pd.DataFrame, video_dir: Path, out_path: Path) 
     rows = []
     for row in clips.itertuples():
         local = video_dir / f"{row.clip_id}.mp4"
-        rows.append({
-            "clip_id": row.clip_id,
-            "s3_uri": f"s3://chillnbite-cameras/anon/{row.clip_id}.mp4",
-            "split": row.split,
-            "size_bytes": local.stat().st_size if local.exists() else "",
-            "sha256": sha256(local) if local.exists() else "",
-            "fps": row.fps,
-            "n_frames": row.n_frames,
-        })
+        rows.append(
+            {
+                "clip_id": row.clip_id,
+                "s3_uri": f"s3://chillnbite-cameras/anon/{row.clip_id}.mp4",
+                "split": row.split,
+                "size_bytes": local.stat().st_size if local.exists() else "",
+                "sha256": sha256(local) if local.exists() else "",
+                "fps": row.fps,
+                "n_frames": row.n_frames,
+            }
+        )
     with out_path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
@@ -109,11 +120,18 @@ def write_source_manifest(clips: pd.DataFrame, video_dir: Path, out_path: Path) 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / ".local/track_b1_bundle")
-    parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset_w15")
-    parser.add_argument("--export-dir", type=Path, default=REPO_ROOT / ".local/cvat_exports/2026-09-09")
+    parser.add_argument(
+        "--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset_w15"
+    )
+    parser.add_argument(
+        "--export-dir", type=Path, default=REPO_ROOT / ".local/cvat_exports/2026-09-09"
+    )
     parser.add_argument("--video-dir", type=Path, default=REPO_ROOT / ".local/source_videos")
-    parser.add_argument("--include-embeddings", action="store_true",
-                        help="Include the 23 MB cached backbone embeddings")
+    parser.add_argument(
+        "--include-embeddings",
+        action="store_true",
+        help="Include the 23 MB cached backbone embeddings",
+    )
     args = parser.parse_args()
 
     out = args.output_dir
@@ -138,10 +156,14 @@ def main() -> int:
 
     # 3. Trained weights. checkpoint_epoch_5.pt is omitted: it is a later, worse epoch
     #    than best_model.pt and would double the bundle for nothing.
-    copy_into(REPO_ROOT / ".local/track_b1_finetune/checkpoints/best_model.pt",
-              out / "models" / "finetuned_last2blocks_best.pt")
-    copy_into(REPO_ROOT / ".local/track_b1_run_w15/checkpoints/head_best.pt",
-              out / "models" / "frozen_probe_head_best.pt")
+    copy_into(
+        REPO_ROOT / ".local/track_b1_finetune/checkpoints/best_model.pt",
+        out / "models" / "finetuned_last2blocks_best.pt",
+    )
+    copy_into(
+        REPO_ROOT / ".local/track_b1_run_w15/checkpoints/head_best.pt",
+        out / "models" / "frozen_probe_head_best.pt",
+    )
     for source, target in [
         (".local/track_b1_finetune/run_config.json", "finetuned_run_config.json"),
         (".local/track_b1_finetune/training_results.json", "finetuned_training_results.json"),
@@ -152,12 +174,16 @@ def main() -> int:
             copy_into(REPO_ROOT / source, out / "models" / target)
 
     # 4. Every evaluation artefact for both models.
-    for label, run in [("finetuned", ".local/track_b1_finetune"),
-                       ("frozen_probe", ".local/track_b1_run_w15")]:
+    for label, run in [
+        ("finetuned", ".local/track_b1_finetune"),
+        ("frozen_probe", ".local/track_b1_run_w15"),
+    ]:
         run_dir = REPO_ROOT / run
         for path in sorted((run_dir / "predictions").glob("*")):
             copy_into(path, out / "results" / label / path.name)
-        for path in sorted(run_dir.glob("*threshold*")) + sorted(run_dir.glob("chosen_thresholds*")):
+        for path in sorted(run_dir.glob("*threshold*")) + sorted(
+            run_dir.glob("chosen_thresholds*")
+        ):
             copy_into(path, out / "results" / label / path.name)
     if (REPO_ROOT / ".local/track_b1_RESULTS.md").exists():
         copy_into(REPO_ROOT / ".local/track_b1_RESULTS.md", out / "results" / "RESULTS.md")
@@ -180,11 +206,13 @@ def main() -> int:
     rows = []
     for path in sorted(out.rglob("*")):
         if path.is_file() and path != manifest_path:
-            rows.append({
-                "path": str(path.relative_to(out)),
-                "size_bytes": path.stat().st_size,
-                "sha256": sha256(path),
-            })
+            rows.append(
+                {
+                    "path": str(path.relative_to(out)),
+                    "size_bytes": path.stat().st_size,
+                    "sha256": sha256(path),
+                }
+            )
     with manifest_path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["path", "size_bytes", "sha256"])
         writer.writeheader()
@@ -192,11 +220,11 @@ def main() -> int:
 
     total = sum(r["size_bytes"] for r in rows)
     print(f"bundle: {out}")
-    print(f"  {len(rows)} files, {total/1e6:.0f} MB")
-    for top in sorted({Path(r['path']).parts[0] for r in rows}):
+    print(f"  {len(rows)} files, {total / 1e6:.0f} MB")
+    for top in sorted({Path(r["path"]).parts[0] for r in rows}):
         size = sum(r["size_bytes"] for r in rows if Path(r["path"]).parts[0] == top)
         count = sum(1 for r in rows if Path(r["path"]).parts[0] == top)
-        print(f"  {top:14s} {count:4d} files  {size/1e6:8.1f} MB")
+        print(f"  {top:14s} {count:4d} files  {size / 1e6:8.1f} MB")
     return 0
 
 

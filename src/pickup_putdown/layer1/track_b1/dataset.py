@@ -287,9 +287,10 @@ def build_window_manifest(
                 window_center=window_center,
                 events_df=own_events,
             )
-            if label == LABEL_BACKGROUND and _assign_window_label(
-                window_center, unresolved_events
-            )[0] != LABEL_BACKGROUND:
+            if (
+                label == LABEL_BACKGROUND
+                and _assign_window_label(window_center, unresolved_events)[0] != LABEL_BACKGROUND
+            ):
                 excluded["unresolved_actor"] += 1
                 continue
 
@@ -559,7 +560,9 @@ def generate_inference_windows(
             )
             all_windows.append(window)
 
-    logger.info(f"Generated {len(all_windows)} inference windows from {len(candidates_df)} candidates")
+    logger.info(
+        f"Generated {len(all_windows)} inference windows from {len(candidates_df)} candidates"
+    )
 
     return all_windows
 
@@ -720,8 +723,7 @@ def decode_window_frames(
         raise FileNotFoundError(video_path)
     # FFmpeg decoder threads are independent of cv2.setNumThreads().
     if hasattr(cv2, "CAP_PROP_N_THREADS"):
-        cap = cv2.VideoCapture(str(video_path), cv2.CAP_FFMPEG,
-                               [cv2.CAP_PROP_N_THREADS, 1])
+        cap = cv2.VideoCapture(str(video_path), cv2.CAP_FFMPEG, [cv2.CAP_PROP_N_THREADS, 1])
         if not cap.isOpened():
             cap.release()
             cap = cv2.VideoCapture(str(video_path))
@@ -855,9 +857,7 @@ def _union_actor_boxes(
         return None
 
     # Filter to time range
-    mask = (pose_track_df["timestamp_s"] >= start_s) & (
-        pose_track_df["timestamp_s"] <= end_s
-    )
+    mask = (pose_track_df["timestamp_s"] >= start_s) & (pose_track_df["timestamp_s"] <= end_s)
     relevant = pose_track_df[mask]
 
     if relevant.empty:
@@ -1074,14 +1074,15 @@ def prepare_window_frames(
         if crop_box is None:
             height, width = frame.shape[:2]
             crop_box = compute_actor_crop_box(
-                actor_track, shelf_region, span[0], span[1], config.crop_margin,
-                (width, height))
+                actor_track, shelf_region, span[0], span[1], config.crop_margin, (width, height)
+            )
         return apply_crop_and_resize(
-            frame[None], crop_box, config.image_size, config.resize_interpolation)[0]
+            frame[None], crop_box, config.image_size, config.resize_interpolation
+        )[0]
 
     return decode_window_frames(
-        video_path, window_start_s, window_end_s, config.num_frames,
-        frame_transform=crop_frame)
+        video_path, window_start_s, window_end_s, config.num_frames, frame_transform=crop_frame
+    )
 
 
 def _file_fingerprint(path: Path) -> list:
@@ -1146,12 +1147,18 @@ def window_cache_relpath(
     the settings they implied — window scope, linear resize, same decoder — so that
     existing cache entries stay valid; any other setting adds the full spec.
     """
-    key = {"version": 1, "video": _file_fingerprint(video_path),
-           "pose": _file_fingerprint(pose_file), "actor": str(actor_id),
-           "start": float(window_start_s), "end": float(window_end_s),
-           "frames": config.num_frames,
-           "size": list(config.image_size),
-           "margin": config.crop_margin, "shelf": shelf_region}
+    key = {
+        "version": 1,
+        "video": _file_fingerprint(video_path),
+        "pose": _file_fingerprint(pose_file),
+        "actor": str(actor_id),
+        "start": float(window_start_s),
+        "end": float(window_end_s),
+        "frames": config.num_frames,
+        "size": list(config.image_size),
+        "margin": config.crop_margin,
+        "shelf": shelf_region,
+    }
     spec = preprocessing_spec(config)
     if {k: spec[k] for k in _LEGACY_WINDOW_KEY_SPEC} != _LEGACY_WINDOW_KEY_SPEC:
         key.update(version=2, preprocessing=spec, span=[float(v) for v in span])
@@ -1212,9 +1219,7 @@ class TrackB1Dataset(Dataset):
         # Validate manifest
         self._validate_manifest()
 
-        logger.info(
-            f"TrackB1Dataset initialized with {len(self.manifest)} samples"
-        )
+        logger.info(f"TrackB1Dataset initialized with {len(self.manifest)} samples")
 
     def _validate_manifest(self) -> None:
         """Check manifest has required columns."""
@@ -1272,12 +1277,23 @@ class TrackB1Dataset(Dataset):
         span = crop_span(row, self.config)
         cache_path = None
         frames = None
-        expected_shape = (self.config.num_frames, self.config.image_size[1],
-                          self.config.image_size[0], 3)
+        expected_shape = (
+            self.config.num_frames,
+            self.config.image_size[1],
+            self.config.image_size[0],
+            3,
+        )
         if self.cache_dir is not None:
             cache_path = self.cache_dir / window_cache_relpath(
-                video_path, pose_file, actor_id, window_start, window_end,
-                shelf_region, span, self.config)
+                video_path,
+                pose_file,
+                actor_id,
+                window_start,
+                window_end,
+                shelf_region,
+                span,
+                self.config,
+            )
             if cache_path.exists():
                 try:
                     frames = np.load(cache_path, allow_pickle=False)
@@ -1290,8 +1306,14 @@ class TrackB1Dataset(Dataset):
         cache_hit = frames is not None
         if frames is None:
             frames = prepare_window_frames(
-                video_path, self._load_pose_track(clip_id, actor_id), shelf_region,
-                window_start, window_end, span, self.config)
+                video_path,
+                self._load_pose_track(clip_id, actor_id),
+                shelf_region,
+                window_start,
+                window_end,
+                span,
+                self.config,
+            )
             if cache_path is not None:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 # Unique temp + atomic replace: concurrent workers may compute
@@ -1527,8 +1549,11 @@ def create_dataloaders(
     worker_options = {}
     if num_workers > 0:
         worker_options = {
-            "persistent_workers": True, "prefetch_factor": 1,
-            "worker_init_fn": _init_data_worker, "multiprocessing_context": "spawn"}
+            "persistent_workers": True,
+            "prefetch_factor": 1,
+            "worker_init_fn": _init_data_worker,
+            "multiprocessing_context": "spawn",
+        }
 
     train_loader = DataLoader(
         train_dataset,
@@ -1557,6 +1582,7 @@ def create_dataloaders(
     )
 
     return train_loader, val_loader
+
 
 def _init_data_worker(worker_id: int) -> None:
     """Keep each worker's CPU libraries from oversubscribing the machine."""

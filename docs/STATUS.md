@@ -97,7 +97,7 @@ confidence (weights for hand/shelf/trajectory, emission threshold).
 ```python
 machine = RepeatingInteractionStateMachine(config)
 events = machine.process(observations)  # batch
-event = machine.update(observation)     # incremental
+event = machine.update(observation)  # incremental
 ```
 
 ### Files

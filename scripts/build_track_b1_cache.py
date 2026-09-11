@@ -55,12 +55,18 @@ def _cache_one(payload: dict) -> tuple[str, bool]:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset")
     parser.add_argument("--video-dir", type=Path, default=REPO_ROOT / ".local/source_videos")
-    parser.add_argument("--cache-dir", type=Path, default=None,
-                        help="default: .local/track_b1_cache (annotation) or "
-                             ".local/track_b1_frame_cache (deployment)")
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="default: .local/track_b1_cache (annotation) or "
+        ".local/track_b1_frame_cache (deployment)",
+    )
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
@@ -72,7 +78,9 @@ def cache_candidates(dataset_dir, args, cache_dir: Path) -> int:
     candidates = dataset_dir.table("candidates")
     if args.split:
         clips = dataset_dir.table("clips")
-        candidates = candidates[candidates["clip_id"].isin(clips.loc[clips["split"] == args.split, "clip_id"])]
+        candidates = candidates[
+            candidates["clip_id"].isin(clips.loc[clips["split"] == args.split, "clip_id"])
+        ]
     if args.limit:
         candidates = candidates.head(args.limit)
     window = dataset_dir.metadata["window"]
@@ -123,8 +131,12 @@ def cache_windows(dataset_dir, args, cache_dir: Path) -> int:
     if args.limit:
         manifest = manifest.head(args.limit)
     dataset = open_window_dataset(dataset_dir, manifest, args.video_dir, frame_cache_dir=cache_dir)
-    loader = DataLoader(dataset, batch_size=16, num_workers=args.workers,
-                        multiprocessing_context="spawn" if args.workers else None)
+    loader = DataLoader(
+        dataset,
+        batch_size=16,
+        num_workers=args.workers,
+        multiprocessing_context="spawn" if args.workers else None,
+    )
     hits = 0
     for step, batch in enumerate(loader, start=1):
         hits += int(batch["cache_hit"].sum())

@@ -224,8 +224,14 @@ class InferenceWindowDataset(Dataset):
         span = crop_span(pd.Series(window.to_dict()), window_config)
         shelf = self.shelf_region if window_config.include_shelf_region else None
         frames = prepare_window_frames(
-            self.video_path, self.pose_track_df, shelf,
-            window.window_start_s, window.window_end_s, span, window_config)
+            self.video_path,
+            self.pose_track_df,
+            shelf,
+            window.window_start_s,
+            window.window_end_s,
+            span,
+            window_config,
+        )
 
         # Normalize to tensor
         tensor = normalize_frames(frames)
@@ -491,9 +497,7 @@ def _find_regions_above_threshold(
     # Half the spacing between consecutive windows: the finest boundary this stride
     # can resolve, and so the right amount to widen a centre-derived interval by.
     if len(predictions) > 1:
-        half_stride = abs(
-            predictions[1].window_center_s - predictions[0].window_center_s
-        ) / 2
+        half_stride = abs(predictions[1].window_center_s - predictions[0].window_center_s) / 2
     else:
         half_stride = min_duration_s / 2
 
@@ -698,17 +702,33 @@ def decode_window_scores(scores: pd.DataFrame, config: InferenceConfig) -> pd.Da
                 predicted_class=int(np.argmax(prob)),
                 confidence=float(np.max(prob)),
             )
-            for start, end, prob in zip(group["window_start_s"], group["window_end_s"], probs, strict=True)
+            for start, end, prob in zip(
+                group["window_start_s"], group["window_end_s"], probs, strict=True
+            )
         ]
         smoothed = smooth_predictions(predictions, config.smoothing_window)
         regions = detect_score_peaks(smoothed, config)
-        merged = merge_same_type_regions(regions, config.same_type_merge_gap_s, config.min_event_duration_s)
+        merged = merge_same_type_regions(
+            regions, config.same_type_merge_gap_s, config.min_event_duration_s
+        )
         rows.extend(
             event.to_dict()
             for event in create_event_predictions(merged, clip_id, candidate_id, actor_id, config)
         )
-    return pd.DataFrame(rows, columns=["pred_id", "clip_id", "type", "t_start", "t_end",
-                                       "score", "model", "candidate_id", "actor_id"])
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "pred_id",
+            "clip_id",
+            "type",
+            "t_start",
+            "t_end",
+            "score",
+            "model",
+            "candidate_id",
+            "actor_id",
+        ],
+    )
 
 
 def suppress_duplicate_events(predictions: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -723,7 +743,9 @@ def suppress_duplicate_events(predictions: pd.DataFrame) -> tuple[pd.DataFrame, 
     kept: list[int] = []
     for _, group in predictions.groupby(["clip_id", "actor_id", "type"], sort=False):
         chosen: list[tuple[float, float]] = []
-        for index, row in group.sort_values(["score", "pred_id"], ascending=[False, True]).iterrows():
+        for index, row in group.sort_values(
+            ["score", "pred_id"], ascending=[False, True]
+        ).iterrows():
             if all(row["t_end"] <= start or row["t_start"] >= end for start, end in chosen):
                 chosen.append((row["t_start"], row["t_end"]))
                 kept.append(index)
@@ -757,8 +779,11 @@ def evaluate_events(
 
     truth = [
         EvaluationEvent(
-            event_id=row.event_id, clip_id=row.clip_id, type=row.type,
-            t_start=float(row.t_start), t_end=float(row.t_end),
+            event_id=row.event_id,
+            clip_id=row.clip_id,
+            type=row.type,
+            t_start=float(row.t_start),
+            t_end=float(row.t_end),
             confidence=_text(getattr(row, "confidence", None), "high"),
             hard_case=bool(getattr(row, "hard_case", False)),
             group_id=_text(getattr(row, "event_group_id", None), ""),
@@ -767,19 +792,28 @@ def evaluate_events(
     ]
     predicted = [
         EvaluationPrediction(
-            pred_id=row.pred_id, clip_id=row.clip_id, type=row.type,
-            t_start=float(row.t_start), t_end=float(row.t_end),
-            score=float(row.score), model=row.model,
+            pred_id=row.pred_id,
+            clip_id=row.clip_id,
+            type=row.type,
+            t_start=float(row.t_start),
+            t_end=float(row.t_end),
+            score=float(row.score),
+            model=row.model,
         )
         for row in predictions.itertuples()
     ]
     ignore_rows = [
-        EvaluationIgnoreInterval(clip_id=row.clip_id, t_start=float(row.t_start), t_end=float(row.t_end))
+        EvaluationIgnoreInterval(
+            clip_id=row.clip_id, t_start=float(row.t_start), t_end=float(row.t_end)
+        )
         for row in ignores.itertuples()
     ]
     return aggregate_metrics(
-        events=truth, preds=predicted, clip_durations=clip_durations,
-        ignores=ignore_rows, tiou_thresholds=tuple(tiou_thresholds),
+        events=truth,
+        preds=predicted,
+        clip_durations=clip_durations,
+        ignores=ignore_rows,
+        tiou_thresholds=tuple(tiou_thresholds),
     )
 
 
@@ -1125,7 +1159,9 @@ def main(
     model.eval()
 
     logger.info(f"Model loaded, device={device}")
-    logger.info(f"Thresholds: pickup={config.pickup_threshold}, putdown={config.putdown_threshold}")
+    logger.info(
+        f"Thresholds: pickup={config.pickup_threshold}, putdown={config.putdown_threshold}"
+    )
 
     # Run inference
     predictions_df = infer_all_candidates(

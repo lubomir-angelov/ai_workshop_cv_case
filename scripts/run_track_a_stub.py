@@ -5,6 +5,7 @@ Validates full data flow: candidates + poses -> state machine -> output format.
 Predictions will be empty (stub classifiers return uniform probabilities),
 but the pipeline wiring is proven.
 """
+
 from __future__ import annotations
 
 import csv
@@ -91,9 +92,9 @@ def main() -> int:
     result = run()
 
     s = result.summary
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Track A Inference (stub classifiers)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Candidates total:       {s.candidates_total}")
     print(f"Candidates processed:   {s.candidates_processed}")
     print(f"Candidates skipped:     {s.candidates_skipped}")
@@ -105,7 +106,7 @@ def main() -> int:
     print(f"Final predictions:      {s.final_events_after_dedup}")
     print(f"  Pickups:              {s.pickup_count}")
     print(f"  Putdowns:             {s.putdown_count}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if result.diagnostics:
         print(f"\nDiagnostics ({len(result.diagnostics)} candidates):")

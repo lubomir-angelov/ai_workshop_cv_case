@@ -59,32 +59,59 @@ from pickup_putdown.layer1.track_b1.dataset import (  # noqa: E402
 
 logger = logging.getLogger("build_track_b1_dataset")
 
-WINDOW_KEYS = ("window_duration_s", "window_stride_s", "num_frames", "image_size",
-               "crop_margin", "crop_scope", "resize_interpolation", "include_shelf_region")
+WINDOW_KEYS = (
+    "window_duration_s",
+    "window_stride_s",
+    "num_frames",
+    "image_size",
+    "crop_margin",
+    "crop_scope",
+    "resize_interpolation",
+    "include_shelf_region",
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--input-mode", choices=["annotation", "deployment"], required=True)
-    parser.add_argument("--export-dir", type=Path,
-                        default=REPO_ROOT / ".local/annotations/cvat/2026-09-09/raw")
+    parser.add_argument(
+        "--export-dir", type=Path, default=REPO_ROOT / ".local/annotations/cvat/2026-09-09/raw"
+    )
     parser.add_argument("--video-dir", type=Path, default=REPO_ROOT / ".local/source_videos")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs/track_b1.yaml",
-                        help="window + input_modes sections supply the window config")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=REPO_ROOT / "configs/track_b1.yaml",
+        help="window + input_modes sections supply the window config",
+    )
     parser.add_argument("--splits", type=Path, default=REPO_ROOT / "configs/track_b1_splits.yaml")
-    parser.add_argument("--split-registry", default=None,
-                        help="registry name in --splits (default: the file's 'default')")
-    parser.add_argument("--pose-data-dir", type=Path, default=REPO_ROOT / ".local/track_b1_data",
-                        help="deployment mode: candidates.parquet + pose_tracks/ from "
-                             "scripts/prepare_track_b1_data.py")
+    parser.add_argument(
+        "--split-registry",
+        default=None,
+        help="registry name in --splits (default: the file's 'default')",
+    )
+    parser.add_argument(
+        "--pose-data-dir",
+        type=Path,
+        default=REPO_ROOT / ".local/track_b1_data",
+        help="deployment mode: candidates.parquet + pose_tracks/ from "
+        "scripts/prepare_track_b1_data.py",
+    )
     parser.add_argument("--shelves", type=Path, default=REPO_ROOT / "configs/shelves.yaml")
     for key in ("window_duration_s", "window_stride_s", "crop_margin"):
         parser.add_argument(f"--{key.replace('_', '-')}", type=float, default=None)
-    parser.add_argument("--context-pad-s", type=float, default=None,
-                        help="annotation mode: held-box padding around each event")
-    parser.add_argument("--accepted-only", action="store_true",
-                        help="Drop intervals still marked draft in CVAT")
+    parser.add_argument(
+        "--context-pad-s",
+        type=float,
+        default=None,
+        help="annotation mode: held-box padding around each event",
+    )
+    parser.add_argument(
+        "--accepted-only", action="store_true", help="Drop intervals still marked draft in CVAT"
+    )
     parser.add_argument("--negative-windows-per-clip", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args(argv)
@@ -114,7 +141,9 @@ def load_pose_inputs(
         raise ValueError(f"pose candidates for clips absent from the CVAT export: {unknown[:5]}")
     duplicated = candidates["candidate_id"].duplicated()
     if duplicated.any():
-        raise ValueError(f"duplicate candidate ids: {candidates.loc[duplicated, 'candidate_id'].head(3).tolist()}")
+        raise ValueError(
+            f"duplicate candidate ids: {candidates.loc[duplicated, 'candidate_id'].head(3).tolist()}"
+        )
 
     tracks: dict[str, pd.DataFrame] = {}
     normalised = False
@@ -142,9 +171,16 @@ def main(argv: list[str] | None = None) -> int:
     config = yaml.safe_load(args.config.read_text()) or {}
     annotation_cfg = config.get("annotation") or {}
     window_config = window_config_from(config, args.input_mode, args)
-    context_pad_s = args.context_pad_s if args.context_pad_s is not None else annotation_cfg.get("context_pad_s", 3.0)
-    negatives_per_clip = (args.negative_windows_per_clip if args.negative_windows_per_clip is not None
-                          else annotation_cfg.get("negative_windows_per_clip", 12))
+    context_pad_s = (
+        args.context_pad_s
+        if args.context_pad_s is not None
+        else annotation_cfg.get("context_pad_s", 3.0)
+    )
+    negatives_per_clip = (
+        args.negative_windows_per_clip
+        if args.negative_windows_per_clip is not None
+        else annotation_cfg.get("negative_windows_per_clip", 12)
+    )
 
     splits_doc = yaml.safe_load(args.splits.read_text())
     registry = args.split_registry or splits_doc["default"]
@@ -165,15 +201,21 @@ def main(argv: list[str] | None = None) -> int:
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     write_result(result, out)
-    logger.info("Imported %d event rows, %d ignore intervals across %d clips",
-                len(result.events), len(result.ignore_intervals), len(result.clips))
+    logger.info(
+        "Imported %d event rows, %d ignore intervals across %d clips",
+        len(result.events),
+        len(result.ignore_intervals),
+        len(result.clips),
+    )
 
     extra: dict = {}
     if args.input_mode == "annotation":
         candidates, tracks = build_candidate_table(
             actor_tracks=result.actor_tracks,
             clips_df=result.clips,
-            negative_config=NegativeSamplingConfig(windows_per_clip=negatives_per_clip, seed=args.seed),
+            negative_config=NegativeSamplingConfig(
+                windows_per_clip=negatives_per_clip, seed=args.seed
+            ),
         )
         write_actor_tracks(tracks, out / "actor_tracks")
         labelling_events = result.events  # CVAT track ids on both sides
@@ -190,7 +232,9 @@ def main(argv: list[str] | None = None) -> int:
         # CVAT boxes are kept for diagnostics only (crop evidence); never model inputs here.
         write_actor_tracks(result.actor_tracks, out / "cvat_tracks")
         association_config = AssociationConfig()
-        association = associate_events(result.events, result.actor_tracks, pose_tracks, association_config)
+        association = associate_events(
+            result.events, result.actor_tracks, pose_tracks, association_config
+        )
         association.to_parquet(out / "actor_association.parquet", index=False)
         labelling_events = events_in_pose_identity(result.events, association)
         labelling_events.to_parquet(out / "events_pose_identity.parquet", index=False)
@@ -214,12 +258,16 @@ def main(argv: list[str] | None = None) -> int:
     # Leakage guard: a clip must not appear under two splits, or validation is fiction.
     straddling = manifest.groupby("clip_id")["split"].nunique()
     if (straddling > 1).any():
-        logger.error("clips present in multiple splits: %s", list(straddling[straddling > 1].index))
+        logger.error(
+            "clips present in multiple splits: %s", list(straddling[straddling > 1].index)
+        )
         return 1
 
     split_of = result.clips.set_index("clip_id")["split"]
     coverage = candidate_coverage(
-        labelling_events.assign(split=labelling_events["clip_id"].map(split_of)), candidates, manifest
+        labelling_events.assign(split=labelling_events["clip_id"].map(split_of)),
+        candidates,
+        manifest,
     )
     coverage["split"] = coverage["clip_id"].map(split_of)
     coverage.to_parquet(out / "candidate_coverage.parquet", index=False)

@@ -137,13 +137,21 @@ def probe_fps(video_path: Path) -> float | None:
     try:
         out = subprocess.run(
             [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=avg_frame_rate",
-                "-of", "json",
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=avg_frame_rate",
+                "-of",
+                "json",
                 str(video_path),
             ],
-            capture_output=True, text=True, timeout=60, check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
         ).stdout
         rate = json.loads(out)["streams"][0]["avg_frame_rate"]
     except (subprocess.SubprocessError, KeyError, IndexError, json.JSONDecodeError) as exc:
@@ -159,10 +167,7 @@ def probe_fps(video_path: Path) -> float | None:
 
 
 def _box_attributes(box: ElementTree.Element) -> dict[str, str]:
-    return {
-        attr.get("name", ""): (attr.text or "")
-        for attr in box.findall("attribute")
-    }
+    return {attr.get("name", ""): (attr.text or "") for attr in box.findall("attribute")}
 
 
 def _split_track(
@@ -256,9 +261,7 @@ def parse_archive(archive: Path, video_dir: Path | None = None) -> ClipAnnotatio
     duration_s = n_frames / fps
 
     intervals = [
-        interval
-        for track in root.findall(".//track")
-        for interval in _split_track(clip_id, track)
+        interval for track in root.findall(".//track") for interval in _split_track(clip_id, track)
     ]
 
     return ClipAnnotations(
@@ -313,9 +316,7 @@ def to_events(
         attrs = interval.attributes
         review_status = attrs.get("review_status", "draft")
         if accepted_only and review_status not in ACCEPTED_REVIEW_STATUSES:
-            logger.debug(
-                "skipping %s: review_status=%s", interval.event_id(), review_status
-            )
+            logger.debug("skipping %s: review_status=%s", interval.event_id(), review_status)
             continue
 
         t_start, t_end = _interval_times(interval, clip.fps, min_duration_s)
@@ -387,7 +388,9 @@ def to_actor_track(clip: ClipAnnotations, context_pad_s: float = 0.0) -> pd.Data
     pad_frames = int(round(context_pad_s * clip.fps))
     rows: list[dict] = []
 
-    def emit(interval: TrackInterval, frame: int, box: tuple[float, float, float, float], padding: bool) -> None:
+    def emit(
+        interval: TrackInterval, frame: int, box: tuple[float, float, float, float], padding: bool
+    ) -> None:
         rows.append(
             {
                 "clip_id": clip.clip_id,
@@ -464,12 +467,12 @@ def assign_splits(
     clips_df = clips_df.copy()
     clips_df["recording_day"] = clips_df["clip_id"].map(recording_day)
 
-    events_per_clip = events_df.groupby("clip_id").size() if len(events_df) else pd.Series(dtype=int)
+    events_per_clip = (
+        events_df.groupby("clip_id").size() if len(events_df) else pd.Series(dtype=int)
+    )
     clips_df["n_events"] = clips_df["clip_id"].map(events_per_clip).fillna(0).astype(int)
 
-    per_day = (
-        clips_df.groupby("recording_day")["n_events"].sum().sort_values(ascending=True)
-    )
+    per_day = clips_df.groupby("recording_day")["n_events"].sum().sort_values(ascending=True)
 
     holdout = list(per_day.index)
     val = set(holdout[:val_days])
@@ -498,7 +501,9 @@ def assign_splits_from_registry(
     """
     clips_df = clips_df.copy()
     clips_df["recording_day"] = clips_df["clip_id"].map(recording_day)
-    events_per_clip = events_df.groupby("clip_id").size() if len(events_df) else pd.Series(dtype=int)
+    events_per_clip = (
+        events_df.groupby("clip_id").size() if len(events_df) else pd.Series(dtype=int)
+    )
     clips_df["n_events"] = clips_df["clip_id"].map(events_per_clip).fillna(0).astype(int)
     unknown = sorted(set(clips_df["recording_day"]) - set(day_splits))
     if unknown:
@@ -534,12 +539,29 @@ class ImportResult:
 
 
 EVENT_COLUMNS = [
-    "event_id", "clip_id", "type", "t_start", "t_end", "hard_case",
-    "annotator", "confidence", "notes", "actor_id", "item_count", "review_status",
-    "event_group_id", "item_index",
+    "event_id",
+    "clip_id",
+    "type",
+    "t_start",
+    "t_end",
+    "hard_case",
+    "annotator",
+    "confidence",
+    "notes",
+    "actor_id",
+    "item_count",
+    "review_status",
+    "event_group_id",
+    "item_index",
 ]
 IGNORE_COLUMNS = [
-    "ignore_id", "clip_id", "t_start", "t_end", "reason", "annotator", "notes",
+    "ignore_id",
+    "clip_id",
+    "t_start",
+    "t_end",
+    "reason",
+    "annotator",
+    "notes",
 ]
 
 

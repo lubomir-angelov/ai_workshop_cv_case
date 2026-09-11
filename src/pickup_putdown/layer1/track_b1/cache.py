@@ -47,7 +47,13 @@ logger = logging.getLogger(__name__)
 # preprocessing) and are rebuilt when it no longer matches.
 CACHE_VERSION = 3
 
-BOX_COLUMNS = ["timestamp_s", "person_bbox_x1", "person_bbox_y1", "person_bbox_x2", "person_bbox_y2"]
+BOX_COLUMNS = [
+    "timestamp_s",
+    "person_bbox_x1",
+    "person_bbox_y1",
+    "person_bbox_x2",
+    "person_bbox_y2",
+]
 
 
 def cache_preprocessing(config: WindowConfig) -> dict:
@@ -196,9 +202,7 @@ def build_candidate_cache(
             logger.error("decoded no frames for %s", candidate_id)
             return None
         if decoded < n_frames:
-            logger.warning(
-                "%s: decoded %d/%d frames, tail held", candidate_id, decoded, n_frames
-            )
+            logger.warning("%s: decoded %d/%d frames, tail held", candidate_id, decoded, n_frames)
 
         output_dir.mkdir(parents=True, exist_ok=True)
         np.save(array_path, frames)
@@ -271,9 +275,7 @@ def find_stale_entries(
         track = tracks[clip_id]
         track = track[track["actor_id"] == candidate["actor_id"]]
         entry = index.get(candidate["candidate_id"])
-        expected = candidate_fingerprint(
-            candidate, track, video_dir / f"{clip_id}.mp4", config
-        )
+        expected = candidate_fingerprint(candidate, track, video_dir / f"{clip_id}.mp4", config)
         if entry is None or entry.fingerprint != expected:
             stale.append(candidate["candidate_id"])
     return stale
@@ -313,7 +315,8 @@ class CachedTrackB1Dataset(Dataset):
         if config is not None:
             wanted = cache_preprocessing(config)
             mismatched = [
-                cid for cid, entry in self.index.items()
+                cid
+                for cid, entry in self.index.items()
                 if (entry.fingerprint or {}).get("preprocessing") != wanted
             ]
             if mismatched:
@@ -334,14 +337,17 @@ class CachedTrackB1Dataset(Dataset):
                 )
             logger.warning(
                 "dropping %d windows from %d uncached candidates (e.g. %s)",
-                int((~known).sum()), len(missing), missing[:3],
+                int((~known).sum()),
+                len(missing),
+                missing[:3],
             )
         self.manifest = manifest[known].reset_index(drop=True)
 
         self._arrays: dict[str, np.ndarray] = {}
         logger.info(
             "CachedTrackB1Dataset: %d windows over %d cached candidates",
-            len(self.manifest), self.manifest["candidate_id"].nunique(),
+            len(self.manifest),
+            self.manifest["candidate_id"].nunique(),
         )
 
     def __len__(self) -> int:

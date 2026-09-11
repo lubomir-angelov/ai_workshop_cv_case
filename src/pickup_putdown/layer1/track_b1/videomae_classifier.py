@@ -121,7 +121,8 @@ def convert_encoder_state(
 # CLASSIFICATION HEAD
 # ============================================================
 
-#TODO: If data set grows its better approach to have a classificationhead that is not just a simple matrix
+
+# TODO: If data set grows its better approach to have a classificationhead that is not just a simple matrix
 class ClassificationHead(nn.Module):
     """Lightweight MLP head for 3-class video classification.
 
@@ -238,7 +239,7 @@ class VideoMAEClassifier(nn.Module):
         self.unfreeze_last_n_blocks = unfreeze_last_n_blocks
 
         # Load pretrained encoder
-        #The VideoMAe obj
+        # The VideoMAe obj
         self.encoder = self._load_encoder(model_name)
 
         # Get hidden dimension from encoder config
@@ -576,9 +577,7 @@ def load_checkpoint(
     # weights_only=False: our own checkpoints embed the epoch's metrics, which include
     # numpy scalars that torch 2.6+ refuses to unpickle under the safe default. These
     # files are written by this package's own save_checkpoint, not fetched from anywhere.
-    checkpoint = torch.load(
-        checkpoint_path, map_location=resolved_device, weights_only=False
-    )
+    checkpoint = torch.load(checkpoint_path, map_location=resolved_device, weights_only=False)
 
     # Create model if not provided
     if model is None:

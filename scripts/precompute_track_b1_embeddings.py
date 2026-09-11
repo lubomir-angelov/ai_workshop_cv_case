@@ -41,15 +41,26 @@ logger = logging.getLogger("precompute_track_b1_embeddings")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset")
     parser.add_argument("--video-dir", type=Path, default=REPO_ROOT / ".local/source_videos")
-    parser.add_argument("--cache-dir", type=Path, default=REPO_ROOT / ".local/track_b1_cache",
-                        help="annotation mode: per-candidate crop cache")
-    parser.add_argument("--frame-cache-dir", type=Path, default=REPO_ROOT / ".local/track_b1_frame_cache",
-                        help="deployment mode: per-window crop cache")
-    parser.add_argument("--output-dir", type=Path, default=None,
-                        help="default: <dataset-dir>/embeddings")
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=REPO_ROOT / ".local/track_b1_cache",
+        help="annotation mode: per-candidate crop cache",
+    )
+    parser.add_argument(
+        "--frame-cache-dir",
+        type=Path,
+        default=REPO_ROOT / ".local/track_b1_frame_cache",
+        help="deployment mode: per-window crop cache",
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=None, help="default: <dataset-dir>/embeddings"
+    )
     parser.add_argument("--model-name", default="MCG-NJU/videomae-base")
     parser.add_argument("--split", nargs="+", default=None, help="restrict to these splits")
     parser.add_argument("--batch-size", type=int, default=8)
@@ -59,23 +70,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     args = parse_args(argv)
     dataset_dir = load_dataset_dir(args.dataset_dir)
     manifest = dataset_dir.table("window_manifest")
     if args.split:
         manifest = manifest[manifest["split"].isin(args.split)].reset_index(drop=True)
     dataset = open_window_dataset(
-        dataset_dir, manifest, args.video_dir, cache_dir=args.cache_dir,
+        dataset_dir,
+        manifest,
+        args.video_dir,
+        cache_dir=args.cache_dir,
         frame_cache_dir=args.frame_cache_dir,
     )
     loader = DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
         multiprocessing_context="spawn" if args.num_workers else None,
     )
 
     device = _resolve_device(args.device)
-    model = VideoMAEClassifier(model_name=args.model_name, num_classes=3, freeze_backbone=True).to(device)
+    model = VideoMAEClassifier(model_name=args.model_name, num_classes=3, freeze_backbone=True).to(
+        device
+    )
     model.eval()
 
     features: list[np.ndarray] = []

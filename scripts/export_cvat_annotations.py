@@ -129,7 +129,9 @@ def collect_jobs(client: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]
     return to_export, excluded
 
 
-def export_task(client: Any, record: dict[str, Any], out_dir: Path) -> tuple[Path | None, str | None]:
+def export_task(
+    client: Any, record: dict[str, Any], out_dir: Path
+) -> tuple[Path | None, str | None]:
     """Export one task's annotations. Returns (archive_path, error)."""
     archive = out_dir / f"{record['name']}__task_{record['task_id']}__job_{record['job_id']}.zip"
     if archive.exists():
@@ -164,8 +166,12 @@ def main(argv: list[str] | None = None) -> int:
         default=datetime.now(UTC).strftime("%Y-%m-%d"),
         help="Export snapshot date; names the local out-dir and the S3 prefix (default: today, UTC)",
     )
-    parser.add_argument("--out-dir", default=None, help="Default: .local/cvat_exports/<export-date>")
-    parser.add_argument("--dry-run", action="store_true", help="Select and report, do not export or upload")
+    parser.add_argument(
+        "--out-dir", default=None, help="Default: .local/cvat_exports/<export-date>"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Select and report, do not export or upload"
+    )
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args(argv)
 
@@ -250,7 +256,9 @@ def main(argv: list[str] | None = None) -> int:
             mismatched.append((key, f"head_object failed: {exc}"))
             continue
         if head["ContentLength"] != local.stat().st_size:
-            mismatched.append((key, f"size {head['ContentLength']} != local {local.stat().st_size}"))
+            mismatched.append(
+                (key, f"size {head['ContentLength']} != local {local.stat().st_size}")
+            )
             continue
         verified += 1
 
