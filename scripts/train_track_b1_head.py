@@ -189,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("early stopping at epoch %d (best %d)", epoch, best_epoch)
             break
 
+    final_state = {k: v.detach().clone() for k, v in head.state_dict().items()}
     head.load_state_dict(best_state)
     head.eval()
     with torch.no_grad():
@@ -198,19 +199,22 @@ def main(argv: list[str] | None = None) -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = args.output_dir / "checkpoints"
     checkpoint_dir.mkdir(exist_ok=True)
+    provenance = {
+        "hidden_dim": int(features.shape[1]),
+        "dropout": args.dropout,
+        "metadata": embedding_metadata,
+        "input_mode": dataset_dir.input_mode,
+        "dataset_dir": str(dataset_dir.path),
+        "encoder_weights_sha256": encoder_sha,
+    }
     torch.save(
-        {
-            "head_state_dict": best_state,
-            "hidden_dim": int(features.shape[1]),
-            "dropout": args.dropout,
-            "epoch": best_epoch,
-            "val_f1_macro": final_f1,
-            "metadata": embedding_metadata,
-            "input_mode": dataset_dir.input_mode,
-            "dataset_dir": str(dataset_dir.path),
-            "encoder_weights_sha256": encoder_sha,
-        },
+        {"head_state_dict": best_state, "epoch": best_epoch, "val_f1_macro": final_f1, **provenance},
         checkpoint_dir / "head_best.pt",
+    )
+    torch.save(
+        {"head_state_dict": final_state, "epoch": history[-1]["epoch"],
+         "val_f1_macro": history[-1]["val_f1_macro"], **provenance},
+        checkpoint_dir / "head_final.pt",
     )
     pd.DataFrame(history).to_csv(args.output_dir / "head_training_history.csv", index=False)
     np.save(args.output_dir / "val_probs.npy", val_probs)
@@ -224,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(
             {
                 "best_epoch": best_epoch,
+                "final_epoch": history[-1]["epoch"],
                 "val_f1_macro": final_f1,
                 "val_f1_per_class": final_per_class,
                 "input_mode": dataset_dir.input_mode,

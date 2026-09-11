@@ -333,6 +333,7 @@ def train_one_epoch(
         "accuracy": metrics.accuracy,
         "f1_macro": metrics.f1_macro,
         "learning_rate": optimizer.param_groups[0]["lr"],
+        "learning_rates": [group["lr"] for group in optimizer.param_groups],
         "elapsed_seconds": elapsed,
     }
 
@@ -860,6 +861,14 @@ def train(
             )
             break
 
+    final_checkpoint_path = save_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        epoch=epoch + 1,
+        metrics=val_metrics.to_dict(),
+        checkpoint_path=config.checkpoint_dir / "final_model.pt",
+    )
+
     # Training complete
     logger.info("\n" + "=" * 60)
     logger.info("TRAINING COMPLETE")
@@ -873,6 +882,7 @@ def train(
     return {
         "best_metrics": best_metrics.to_dict() if best_metrics else None,
         "best_checkpoint_path": str(best_checkpoint_path) if best_checkpoint_path else None,
+        "final_checkpoint_path": str(final_checkpoint_path),
         "training_history": training_history,
         "final_epoch": epoch + 1,
     }
