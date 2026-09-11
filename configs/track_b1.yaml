@@ -13,9 +13,10 @@ model:
   num_classes: 3  # background, pickup, putdown
 
   # Backbone freezing strategy
-  # Unfreezing the last 2 blocks beat the frozen linear probe decisively on
-  # validation (event F1 @ tIoU 0.3: 0.806 vs 0.585). Requires the full pixel path
-  # in train_track_b1.py; the cached-embedding fast path is frozen-backbone only.
+  # CVAT branch (annotation-conditioned, not reproduced here): unfreezing the last 2
+  # blocks beat the frozen probe on validation (event F1 @ tIoU 0.3 reported as 0.806
+  # vs 0.585; other documents report 0.783, see docs/TRACK_B1_INTEGRATION.md).
+  # Requires the pixel path in train_track_b1.py; embeddings are frozen-only.
   freeze_backbone: true
   unfreeze_last_n_blocks: 2  # Fine-tune last N transformer blocks
 
@@ -38,6 +39,22 @@ window:
   # Image preprocessing
   image_size: [224, 224]    # Target size after crop/resize
   crop_margin: 0.15         # Margin around actor bounding box
+
+# Per-input-mode preprocessing (merged over `window` by build_track_b1_dataset.py and
+# recorded in each dataset's build_metadata.json; every downstream script reads it
+# from there, so cache, training, inference and diagnostics cannot disagree).
+#   annotation: crop fixed per candidate from the CVAT box (per-candidate cache)
+#   deployment: crop per window from the pose person box + shelf region (pose route)
+# The two produce different inputs for the same moment; compare model variants only
+# within one mode. The historical frozen-head baseline used deployment preprocessing
+# with 2.5 s / 0.5 s windows.
+input_modes:
+  annotation:
+    crop_scope: "candidate"
+    resize_interpolation: "area"
+  deployment:
+    crop_scope: "window"
+    resize_interpolation: "linear"
 
 # =============================================================================
 # TRAINING CONFIGURATION
@@ -80,9 +97,10 @@ training:
 # INFERENCE CONFIGURATION
 # =============================================================================
 inference:
-  # Selected on the validation split only, by the mean of event F1 at tIoU 0.3 and
-  # 0.5 (scripts/tune_track_b1_thresholds.py), for the fine-tuned model.
-  # Validation: F1@0.3 = 0.806, F1@0.5 = 0.746. Test was not read during selection.
+  # Selected by the CVAT branch on its validation split only, by the mean of event F1
+  # at tIoU 0.3 and 0.5, for its annotation-conditioned fine-tuned model (reported
+  # F1@0.3 = 0.806, F1@0.5 = 0.746; unverified here). Re-tune per model and input mode
+  # with scripts/tune_track_b1_thresholds.py.
   pickup_threshold: 0.40
   putdown_threshold: 0.45
 
@@ -117,7 +135,9 @@ inference:
 # scripts/build_track_b1_dataset.py. Actor crop boxes come from the annotation
 # tracks themselves; no pose pipeline output is required for these clips.
 annotation:
-  export_dir: ".local/cvat_exports/2026-09-09"
+  # S3 mirror of the export (scripts/download_all_staged.sh); a fresh
+  # scripts/export_cvat_annotations.py run writes .local/cvat_exports/<date>.
+  export_dir: ".local/annotations/cvat/2026-09-09/raw"
 
   # Held-box padding around each event. This is where hard negatives come from:
   # without it a background window finds no box, falls back to the full 4K frame,
@@ -127,10 +147,9 @@ annotation:
   # Keep intervals still marked "draft" in CVAT (13 of 261 at time of writing).
   accepted_only: false
 
-  # Splits are assigned by recording day, not by clip: clips recorded minutes
-  # apart share shoppers and shelf state, so a clip-level split would leak.
-  val_days: 1
-  test_days: 1
+  # Splits are by recording day, from an explicit registry (default registry in
+  # the file). 20260526 is not an untouched test day; see the registry caveat.
+  split_registry_file: "configs/track_b1_splits.yaml"
 
   # Windows synthesised per completed-but-empty clip (verified negatives).
   negative_windows_per_clip: 12
@@ -139,18 +158,18 @@ annotation:
 # DATA PATHS (Override via CLI or environment)
 # =============================================================================
 data:
-  # Built by scripts/build_track_b1_dataset.py
-  dataset_dir: ".local/track_b1_dataset"
-  events_path: ".local/track_b1_dataset/events.parquet"
-  ignore_intervals_path: ".local/track_b1_dataset/ignore_intervals.parquet"
-  candidates_path: ".local/track_b1_dataset/candidates.parquet"
-  clips_path: ".local/track_b1_dataset/clips.parquet"
-  window_manifest_path: ".local/track_b1_dataset/window_manifest.parquet"
-
-  # Actor tracks in pose-track column layout, derived from the CVAT boxes.
-  pose_tracks_dir: ".local/track_b1_dataset/actor_tracks"
+  # Built by scripts/build_track_b1_dataset.py, one directory per input mode. Each
+  # holds events/ignore_intervals/clips/candidates/window_manifest parquet files,
+  # actor_tracks/ (annotation) or pose_tracks/ (deployment), and build_metadata.json.
+  dataset_dir: ".local/track_b1_dataset"                # --input-mode annotation
+  deployment_dataset_dir: ".local/track_b1_dataset_deploy"  # --input-mode deployment
+  # Pose candidates/tracks for deployment mode (scripts/prepare_track_b1_data.py).
+  pose_data_dir: ".local/track_b1_data"
 
   video_dir: ".local/source_videos"
+
+  # Deployment mode: lazily filled per-window uint8 crop cache (TrackB1Dataset).
+  frame_cache_dir: ".local/track_b1_frame_cache"
 
   # Built by scripts/build_track_b1_cache.py — decoding 4K windows by seeking is
   # about four orders of magnitude too slow to train on.

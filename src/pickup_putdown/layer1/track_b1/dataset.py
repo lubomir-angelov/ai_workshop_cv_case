@@ -15,9 +15,9 @@ The output tensor shape is [T, C, H, W] where:
 
 from __future__ import annotations
 
-import logging
 import hashlib
 import json
+import logging
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -74,6 +74,19 @@ class WindowConfig:
     # Actor-conditioned crop
     crop_margin: float = 0.15  # 15% margin around actor+shelf union
 
+    # Which span the crop box is the union over:
+    #   "window"    — each window's own span (pose route; crop may change per window)
+    #   "candidate" — the whole candidate, fixed for all its windows (CVAT route and
+    #                 the per-candidate frame cache in cache.py)
+    crop_scope: str = "window"
+    # cv2 interpolation for the crop -> image_size resize: "linear" or "area".
+    resize_interpolation: str = "linear"
+    # Union the candidate's shelf-region polygon into the crop. Off by default because
+    # that is what every pose-route run actually did: shelf regions were read from a
+    # key configs/shelves.yaml does not have, so none were ever applied. Enabling it
+    # enlarges crops substantially (Shelf_01 spans ~half the frame); evaluate first.
+    include_shelf_region: bool = False
+
     # Label weights by confidence
     weight_high: float = 1.0
     weight_med: float = 1.0
@@ -81,6 +94,39 @@ class WindowConfig:
 
     # Validation
     min_event_overlap_ratio: float = 0.0  # Minimum overlap for center-based assignment
+
+    def __post_init__(self) -> None:
+        if self.crop_scope not in CROP_SCOPES:
+            raise ValueError(f"crop_scope must be one of {CROP_SCOPES}, got {self.crop_scope!r}")
+        if self.resize_interpolation not in INTERPOLATIONS:
+            raise ValueError(
+                f"resize_interpolation must be one of {sorted(INTERPOLATIONS)}, "
+                f"got {self.resize_interpolation!r}"
+            )
+        self.image_size = tuple(self.image_size)
+
+
+CROP_SCOPES = ("window", "candidate")
+INTERPOLATIONS = {"linear": cv2.INTER_LINEAR, "area": cv2.INTER_AREA}
+
+# Bump whenever decoding, frame sampling, cropping or colour handling changes the
+# pixels a given WindowConfig produces. Part of every cache key and run record.
+PREPROCESSING_VERSION = 2
+
+
+def preprocessing_spec(config: WindowConfig) -> dict:
+    """Every setting that determines the pixels of a window (never the label)."""
+    return {
+        "version": PREPROCESSING_VERSION,
+        "num_frames": int(config.num_frames),
+        "image_size": [int(v) for v in config.image_size],
+        "crop_margin": float(config.crop_margin),
+        "crop_scope": config.crop_scope,
+        "resize_interpolation": config.resize_interpolation,
+        "include_shelf_region": bool(config.include_shelf_region),
+        "frame_sampling": "linspace(int(start*fps), int(end*fps)-1, num_frames)",
+        "normalization": "bgr->rgb, imagenet mean/std",
+    }
 
 
 @dataclass
@@ -100,6 +146,8 @@ class WindowSample:
     event_confidence: Optional[str] = None
     sample_weight: float = 1.0
     split: Optional[str] = None
+    candidate_start_s: float | None = None
+    candidate_end_s: float | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for DataFrame creation."""
@@ -117,6 +165,8 @@ class WindowSample:
             "event_confidence": self.event_confidence,
             "sample_weight": self.sample_weight,
             "split": self.split,
+            "candidate_start_s": self.candidate_start_s,
+            "candidate_end_s": self.candidate_end_s,
         }
 
 
@@ -135,6 +185,22 @@ def build_window_manifest(
 ) -> pd.DataFrame:
     """Generate all training/validation/test windows with labels.
 
+    Labels come from the event whose interval contains the window centre. How an
+    event is attributed to a candidate depends on ``events_df``:
+
+    * no ``actor_id`` column — clip-level ground truth: any candidate in the clip
+      takes the label (historical behaviour; overlapping actors can receive each
+      other's labels, so a warning is logged when candidates overlap);
+    * ``actor_id`` column — actor-resolved ground truth in the *same identity
+      system* as ``candidates_df["actor_id"]``. A window takes a label only from
+      its own actor's events. A window centred in an event whose actor is null
+      (association failed or ambiguous) is excluded, never labelled background.
+      Pooled ``*untracked`` candidate actors are excluded inside every event.
+
+    CVAT interaction-track ids (``trk007``) and pose person ids are different
+    identity systems; map them with ``actor_association.associate_events`` first.
+    Disjoint identity systems raise instead of silently producing background.
+
     Args:
         candidates_df: DataFrame with candidate intervals (from Task 5).
         events_df: DataFrame with ground-truth events (from Task 7).
@@ -148,11 +214,25 @@ def build_window_manifest(
     """
     all_samples: list[dict] = []
     sample_counter = 0
+    excluded = {"ignore": 0, "unresolved_actor": 0}
+
+    unknown = sorted(set(candidates_df["clip_id"]) - set(clips_df["clip_id"]))
+    if unknown:
+        raise ValueError(
+            f"{len(unknown)} candidate clip_id(s) missing from clips_df "
+            f"(e.g. {unknown[:3]}); normalise clip ids before building windows"
+        )
+    split_by_clip = dict(zip(clips_df["clip_id"], clips_df["split"], strict=True))
+
+    actor_resolved = "actor_id" in events_df.columns
+    if actor_resolved:
+        _check_shared_identity(candidates_df, events_df)
+    else:
+        _warn_clip_level_overlaps(candidates_df, events_df)
 
     # Filter by split if specified
     if split is not None:
-        clip_ids_in_split = set(clips_df[clips_df["split"] == split]["clip_id"])
-        candidates_df = candidates_df[candidates_df["clip_id"].isin(clip_ids_in_split)]
+        candidates_df = candidates_df[candidates_df["clip_id"].map(split_by_clip) == split]
 
     # Process each candidate
     for _, candidate in candidates_df.iterrows():
@@ -174,21 +254,18 @@ def build_window_manifest(
             )
             continue
 
-        # Get events for this clip. When the ground truth is actor-resolved, restrict
-        # to this candidate's actor: two actors can interact with the same shelf at
-        # overlapping times, and a clip-level lookup would stamp actor A's pickup onto
-        # a window cropped around actor B.
         clip_events = events_df[events_df["clip_id"] == clip_id]
-        if "actor_id" in clip_events.columns:
-            clip_events = clip_events[clip_events["actor_id"] == actor_id]
+        own_events, unresolved_events = clip_events, clip_events.iloc[:0]
+        if actor_resolved:
+            if str(actor_id).endswith("untracked"):
+                own_events, unresolved_events = clip_events.iloc[:0], clip_events
+            else:
+                own_events = clip_events[clip_events["actor_id"] == actor_id]
+                unresolved_events = clip_events[clip_events["actor_id"].isna()]
 
         # Get ignore intervals for this clip
         clip_ignores = ignore_intervals_df[ignore_intervals_df["clip_id"] == clip_id]
-
-        # Get clip split
-        clip_split = clips_df[clips_df["clip_id"] == clip_id]["split"].iloc[0] if len(
-            clips_df[clips_df["clip_id"] == clip_id]
-        ) > 0 else None
+        clip_split = split_by_clip[clip_id]
 
         # Generate sliding windows for this candidate
         windows = _generate_windows_for_candidate(
@@ -202,13 +279,19 @@ def build_window_manifest(
             window_center = (win_start + win_end) / 2
 
             if _is_in_ignore_interval(window_center, clip_ignores):
+                excluded["ignore"] += 1
                 continue
 
             # Assign label based on window center
             label, event_id, event_confidence = _assign_window_label(
                 window_center=window_center,
-                events_df=clip_events,
+                events_df=own_events,
             )
+            if label == LABEL_BACKGROUND and _assign_window_label(
+                window_center, unresolved_events
+            )[0] != LABEL_BACKGROUND:
+                excluded["unresolved_actor"] += 1
+                continue
 
             # Compute sample weight
             sample_weight = _compute_sample_weight(event_confidence, config)
@@ -231,6 +314,8 @@ def build_window_manifest(
                 event_confidence=event_confidence,
                 sample_weight=sample_weight,
                 split=clip_split,
+                candidate_start_s=float(window_start),
+                candidate_end_s=float(window_end),
             )
 
             all_samples.append(sample.to_dict())
@@ -239,7 +324,7 @@ def build_window_manifest(
 
     logger.info(
         f"Built window manifest: {len(manifest_df)} samples "
-        f"(split={split or 'all'})"
+        f"(split={split or 'all'}, excluded={excluded})"
     )
 
     if len(manifest_df) > 0:
@@ -247,6 +332,43 @@ def build_window_manifest(
         logger.info(f"Label distribution: {label_counts}")
 
     return manifest_df
+
+
+def _check_shared_identity(candidates_df: pd.DataFrame, events_df: pd.DataFrame) -> None:
+    """Refuse actor-resolved labels whose actor ids never appear among candidates."""
+    event_actors = set(events_df["actor_id"].dropna())
+    candidate_actors = set(candidates_df["actor_id"])
+    if event_actors and candidate_actors and not event_actors & candidate_actors:
+        raise ValueError(
+            "events_df['actor_id'] and candidates_df['actor_id'] share no ids "
+            f"(e.g. {sorted(event_actors)[:2]} vs {sorted(candidate_actors)[:2]}); "
+            "they are different identity systems. Associate events to candidate "
+            "actors first (actor_association.associate_events), or drop the "
+            "actor_id column for explicitly clip-level labels."
+        )
+
+
+def _warn_clip_level_overlaps(candidates_df: pd.DataFrame, events_df: pd.DataFrame) -> None:
+    """Clip-level labels are only safe while candidates of different actors never overlap."""
+    if events_df.empty or candidates_df.empty:
+        return
+    pairs = 0
+    for _, group in candidates_df.groupby("clip_id"):
+        rows = group.sort_values("window_start_s")[
+            ["actor_id", "window_start_s", "window_end_s"]
+        ].to_numpy()
+        for i in range(len(rows)):
+            for j in range(i + 1, len(rows)):
+                if rows[j][1] >= rows[i][2]:
+                    break
+                pairs += rows[i][0] != rows[j][0]
+    if pairs:
+        logger.warning(
+            "Clip-level labels (events have no actor_id): %d overlapping candidate pairs "
+            "belong to different actors, so one actor's event can label another "
+            "actor's crop. Use actor-resolved events to avoid this.",
+            pairs,
+        )
 
 
 def generate_sliding_windows(
@@ -353,6 +475,8 @@ class InferenceWindow:
     window_start_s: float
     window_end_s: float
     window_center_s: float
+    candidate_start_s: float | None = None
+    candidate_end_s: float | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -364,6 +488,8 @@ class InferenceWindow:
             "window_start_s": self.window_start_s,
             "window_end_s": self.window_end_s,
             "window_center_s": self.window_center_s,
+            "candidate_start_s": self.candidate_start_s,
+            "candidate_end_s": self.candidate_end_s,
         }
 
 
@@ -428,6 +554,8 @@ def generate_inference_windows(
                 window_start_s=win_start,
                 window_end_s=win_end,
                 window_center_s=(win_start + win_end) / 2,
+                candidate_start_s=float(cand_start),
+                candidate_end_s=float(cand_end),
             )
             all_windows.append(window)
 
@@ -477,6 +605,8 @@ def generate_inference_windows_for_candidate(
             window_start_s=win_start,
             window_end_s=win_end,
             window_center_s=(win_start + win_end) / 2,
+            candidate_start_s=float(cand_start),
+            candidate_end_s=float(cand_end),
         )
         for win_start, win_end in windows
     ]
@@ -833,6 +963,7 @@ def apply_crop_and_resize(
     frames: np.ndarray,
     crop_box: tuple[int, int, int, int],
     target_size: tuple[int, int],
+    interpolation: str = "linear",
 ) -> np.ndarray:
     """Crop and resize frames to target resolution.
 
@@ -840,6 +971,7 @@ def apply_crop_and_resize(
         frames: Array of shape [T, H, W, C] in uint8 format.
         crop_box: (x1, y1, x2, y2) crop coordinates.
         target_size: (width, height) target resolution.
+        interpolation: Key of ``INTERPOLATIONS`` ("linear" is cv2's default).
 
     Returns:
         Array of shape [T, target_H, target_W, C] in uint8 format.
@@ -858,7 +990,9 @@ def apply_crop_and_resize(
             cropped = frame
 
         # Resize
-        resized = cv2.resize(cropped, (target_w, target_h))
+        resized = cv2.resize(
+            cropped, (target_w, target_h), interpolation=INTERPOLATIONS[interpolation]
+        )
         cropped_frames.append(resized)
 
     return np.stack(cropped_frames, axis=0)
@@ -897,6 +1031,132 @@ def normalize_frames(
     tensor = tensor.permute(0, 3, 1, 2)  # [T, H, W, C] -> [T, C, H, W]
 
     return tensor
+
+
+# ============================================================
+# SHARED WINDOW PREPROCESSING
+# ============================================================
+
+
+def crop_span(row: pd.Series, config: WindowConfig) -> tuple[float, float]:
+    """Time span whose actor boxes define a window's crop, per ``config.crop_scope``."""
+    if config.crop_scope == "window":
+        return float(row["window_start_s"]), float(row["window_end_s"])
+    if pd.isna(row.get("candidate_start_s")) or pd.isna(row.get("candidate_end_s")):
+        raise ValueError(
+            "crop_scope='candidate' needs candidate_start_s/candidate_end_s in the "
+            "manifest; rebuild it with build_window_manifest"
+        )
+    return float(row["candidate_start_s"]), float(row["candidate_end_s"])
+
+
+def prepare_window_frames(
+    video_path: Path,
+    actor_track: pd.DataFrame,
+    shelf_region: dict | None,
+    window_start_s: float,
+    window_end_s: float,
+    span: tuple[float, float],
+    config: WindowConfig,
+) -> np.ndarray:
+    """Decode, crop and resize one window: the single definition of model-input pixels.
+
+    Training, inference, frame caching and diagnostics all call this (the
+    per-candidate cache in ``cache.py`` reproduces it for ``crop_scope="candidate"``,
+    which a test asserts), so none of them can drift from the others.
+
+    Returns uint8 BGR frames of shape [T, H, W, C].
+    """
+    crop_box = None
+
+    def crop_frame(frame: np.ndarray) -> np.ndarray:
+        nonlocal crop_box
+        if crop_box is None:
+            height, width = frame.shape[:2]
+            crop_box = compute_actor_crop_box(
+                actor_track, shelf_region, span[0], span[1], config.crop_margin,
+                (width, height))
+        return apply_crop_and_resize(
+            frame[None], crop_box, config.image_size, config.resize_interpolation)[0]
+
+    return decode_window_frames(
+        video_path, window_start_s, window_end_s, config.num_frames,
+        frame_transform=crop_frame)
+
+
+def _file_fingerprint(path: Path) -> list:
+    """Identity of an input file for cache keys (assumes inputs stable during a run)."""
+    if not path.exists():
+        return [str(path.resolve()), None]
+    stat = path.stat()
+    return [str(path.resolve()), stat.st_size, stat.st_mtime_ns]
+
+
+_LEGACY_WINDOW_KEY_SPEC = {
+    "crop_scope": "window",
+    "resize_interpolation": "linear",
+    "include_shelf_region": False,
+}
+
+
+def load_shelf_regions(path: Path) -> dict[str, dict]:
+    """Shelf regions by id from configs/shelves.yaml (``cameras.<camera>.regions``).
+
+    Raises when the file defines no regions, instead of returning an empty mapping
+    that silently disables every shelf-conditioned crop.
+    """
+    import yaml
+
+    document = yaml.safe_load(Path(path).read_text()) or {}
+    regions = list(document.get("regions", []))
+    for camera in (document.get("cameras") or {}).values():
+        regions.extend(camera.get("regions", []))
+    if not regions:
+        raise ValueError(f"{path} defines no shelf regions")
+    return {region["region_id"]: region for region in regions}
+
+
+def effective_shelf_region(
+    shelf_regions: dict[str, dict], region_id: object, config: WindowConfig
+) -> dict | None:
+    """The shelf polygon a window's crop includes, or None (see include_shelf_region)."""
+    if not config.include_shelf_region or not isinstance(region_id, str) or not region_id:
+        return None
+    if region_id not in shelf_regions:
+        raise KeyError(f"shelf region {region_id!r} not in the loaded shelf regions")
+    return shelf_regions[region_id]
+
+
+def window_cache_relpath(
+    video_path: Path,
+    pose_file: Path,
+    actor_id: str,
+    window_start_s: float,
+    window_end_s: float,
+    shelf_region: dict | None,
+    span: tuple[float, float],
+    config: WindowConfig,
+) -> Path:
+    """Content-addressed path of one window in the per-window frame cache.
+
+    The key covers source video and actor-track file identity, window, shelf region
+    and every preprocessing setting, never the label, so relabelling reuses pixels
+    while any input or preprocessing change misses. Version-1 keys (written by the
+    pose route before crop scope and interpolation were configurable) are kept for
+    the settings they implied — window scope, linear resize, same decoder — so that
+    existing cache entries stay valid; any other setting adds the full spec.
+    """
+    key = {"version": 1, "video": _file_fingerprint(video_path),
+           "pose": _file_fingerprint(pose_file), "actor": str(actor_id),
+           "start": float(window_start_s), "end": float(window_end_s),
+           "frames": config.num_frames,
+           "size": list(config.image_size),
+           "margin": config.crop_margin, "shelf": shelf_region}
+    spec = preprocessing_spec(config)
+    if {k: spec[k] for k in _LEGACY_WINDOW_KEY_SPEC} != _LEGACY_WINDOW_KEY_SPEC:
+        key.update(version=2, preprocessing=spec, span=[float(v) for v in span])
+    digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()
+    return Path(digest[:2]) / f"{digest}.npy"
 
 
 # ============================================================
@@ -1008,29 +1268,16 @@ class TrackB1Dataset(Dataset):
         video_path = self._get_video_path(clip_id)
 
         pose_file = self.pose_tracks_dir / f"{clip_id}.parquet"
-        shelf_region = self.shelf_regions.get(region_id) if region_id else None
+        shelf_region = effective_shelf_region(self.shelf_regions, region_id, self.config)
+        span = crop_span(row, self.config)
         cache_path = None
         frames = None
         expected_shape = (self.config.num_frames, self.config.image_size[1],
                           self.config.image_size[0], 3)
         if self.cache_dir is not None:
-            # Labels are deliberately excluded: cached pixels never carry GT.
-            # Source/pose stat fingerprints assume inputs are stable during a run.
-            def fingerprint(path):
-                if not path.exists():
-                    return [str(path.resolve()), None]
-                stat = path.stat()
-                return [str(path.resolve()), stat.st_size, stat.st_mtime_ns]
-
-            key = {"version": 1, "video": fingerprint(video_path),
-                   "pose": fingerprint(pose_file), "actor": str(actor_id),
-                   "start": float(window_start), "end": float(window_end),
-                   "frames": self.config.num_frames,
-                   "size": list(self.config.image_size),
-                   "margin": self.config.crop_margin, "shelf": shelf_region}
-            digest = hashlib.sha256(json.dumps(key, sort_keys=True,
-                                               default=str).encode()).hexdigest()
-            cache_path = self.cache_dir / digest[:2] / f"{digest}.npy"
+            cache_path = self.cache_dir / window_cache_relpath(
+                video_path, pose_file, actor_id, window_start, window_end,
+                shelf_region, span, self.config)
             if cache_path.exists():
                 try:
                     frames = np.load(cache_path, allow_pickle=False)
@@ -1042,24 +1289,9 @@ class TrackB1Dataset(Dataset):
 
         cache_hit = frames is not None
         if frames is None:
-            pose_track = self._load_pose_track(clip_id, actor_id)
-            crop_box = None
-
-            def crop_frame(frame):
-                nonlocal crop_box
-                if crop_box is None:
-                    height, width = frame.shape[:2]
-                    crop_box = compute_actor_crop_box(
-                        pose_track, shelf_region, window_start, window_end,
-                        self.config.crop_margin, (width, height))
-                return apply_crop_and_resize(
-                    frame[None], crop_box, self.config.image_size)[0]
-
-            frames = decode_window_frames(
-                video_path, window_start, window_end, self.config.num_frames,
-                frame_transform=crop_frame)
-            if frames is None:
-                raise RuntimeError(f"Cannot decode sample {row['sample_id']}")
+            frames = prepare_window_frames(
+                video_path, self._load_pose_track(clip_id, actor_id), shelf_region,
+                window_start, window_end, span, self.config)
             if cache_path is not None:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 # Unique temp + atomic replace: concurrent workers may compute

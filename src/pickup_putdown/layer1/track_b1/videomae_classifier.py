@@ -29,16 +29,17 @@ Architecture:
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Optional
 
 import torch
 import torch.nn as nn
-from transformers import VideoMAEConfig, VideoMAEModel
-
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
+from transformers import VideoMAEConfig, VideoMAEModel
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +54,68 @@ LABEL_PICKUP: int = 1
 LABEL_PUTDOWN: int = 2
 
 # Default model configurations
-DEFAULT_MODEL_NAME: str = "MCG-NJU/videomae-small"
+DEFAULT_MODEL_NAME: str = "MCG-NJU/videomae-base"
 VIDEOMAE_SMALL_HIDDEN_DIM: int = 384
 VIDEOMAE_BASE_HIDDEN_DIM: int = 768
+
+
+# ============================================================
+# PRETRAINED WEIGHT LOADING
+# ============================================================
+
+
+def resolve_weights_path(model_name: str) -> Path:
+    """``model.safetensors`` for a local model directory or a HuggingFace repo id."""
+    local = Path(model_name)
+    if local.is_dir():
+        path = local / "model.safetensors"
+        if not path.is_file():
+            raise FileNotFoundError(f"{path} not found")
+        return path
+    return Path(hf_hub_download(repo_id=model_name, filename="model.safetensors"))
+
+
+def file_sha256(path: Path) -> str:
+    """Content hash identifying the exact pretrained weights (embedding-cache key)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def convert_encoder_state(
+    checkpoint: dict[str, torch.Tensor],
+    model_keys: Iterable[str],
+) -> dict[str, torch.Tensor]:
+    """Map a VideoMAE pretraining checkpoint onto the installed encoder's key layout.
+
+    Keeps only ``videomae.*`` (the reconstruction decoder is discarded). When the
+    model has ``query.bias`` but the checkpoint has ``q_bias``, the biases are moved
+    and the key bias is zero, which is what the legacy layout computes (it has no key
+    bias parameter). Any other mismatch is left for ``strict=True`` to reject.
+    """
+    prefix = "videomae."
+    state = {
+        name.removeprefix(prefix): tensor
+        for name, tensor in checkpoint.items()
+        if name.startswith(prefix)
+    }
+    if not state:
+        raise RuntimeError(f"checkpoint contains no {prefix!r} weights")
+
+    model_keys = set(model_keys)
+    for legacy in [k for k in state if k.endswith(".attention.attention.q_bias")]:
+        base = legacy.removesuffix(".q_bias")
+        if f"{base}.q_bias" in model_keys:
+            continue  # installed transformers still uses the legacy layout
+        for old, new in (("q_bias", "query.bias"), ("v_bias", "value.bias")):
+            if f"{base}.{new}" in state:
+                raise RuntimeError(f"Ambiguous checkpoint: both {base}.{old} and .{new}")
+            state[f"{base}.{new}"] = state.pop(f"{base}.{old}")
+        if f"{base}.key.bias" in model_keys:
+            state[f"{base}.key.bias"] = torch.zeros_like(state[f"{base}.query.bias"])
+    return state
 
 
 # ============================================================
@@ -202,77 +262,35 @@ class VideoMAEClassifier(nn.Module):
         )
 
     def _load_encoder(self, model_name: str) -> VideoMAEModel:
-        """Load the legacy VideoMAE encoder with explicit bias conversion.
+        """Load the pretrained VideoMAE encoder strictly, never via ``from_pretrained``.
 
-        Intended for the MCG-NJU/videomae-base pretraining checkpoint
-        and the installed query/key/value Linear-bias implementation.
+        ``from_pretrained`` silently random-initialises any parameter whose name it
+        cannot find. The MCG-NJU pretraining checkpoints store attention biases as
+        ``q_bias``/``v_bias``; transformers 5.x models expect ``query.bias``/
+        ``key.bias``/``value.bias`` instead, so part of the backbone would be random.
+        The checkpoint is converted to whatever layout the installed transformers
+        builds, then loaded with ``strict=True``.
         """
         logger.info("Loading VideoMAE encoder from %s", model_name)
 
         config = VideoMAEConfig.from_pretrained(model_name)
         encoder = VideoMAEModel(config)
-
-        weights_path = hf_hub_download(
-            repo_id=model_name,
-            filename="model.safetensors",
+        weights_path = resolve_weights_path(model_name)
+        state = convert_encoder_state(
+            load_file(str(weights_path), device="cpu"), encoder.state_dict().keys()
         )
-        checkpoint = load_file(weights_path, device="cpu")
-
-        # Keep only the encoder; discard the reconstruction decoder.
-        prefix = "videomae."
-        state = {
-            name.removeprefix(prefix): tensor
-            for name, tensor in checkpoint.items()
-            if name.startswith(prefix)
-        }
-        if not state:
-            raise RuntimeError(
-                f"{model_name}: checkpoint contains no {prefix!r} weights"
-            )
-
-        converted = 0
-        for index in range(config.num_hidden_layers):
-            base = f"encoder.layer.{index}.attention.attention"
-
-            for old_suffix, new_suffix in (
-                ("q_bias", "query.bias"),
-                ("v_bias", "value.bias"),
-            ):
-                old_key = f"{base}.{old_suffix}"
-                new_key = f"{base}.{new_suffix}"
-
-                if old_key not in state:
-                    raise RuntimeError(
-                        f"Expected legacy checkpoint parameter: {old_key}"
-                    )
-                if new_key in state:
-                    raise RuntimeError(
-                        f"Ambiguous checkpoint: both {old_key} and {new_key}"
-                    )
-
-                state[new_key] = state.pop(old_key)
-                converted += 1
-
-            key_bias = f"{base}.key.bias"
-            if key_bias in state:
-                raise RuntimeError(
-                    f"Unexpected key bias in legacy checkpoint: {key_bias}"
-                )
-            state[key_bias] = torch.zeros_like(state[f"{base}.query.bias"])
-
         # Raises on missing/unexpected keys or incompatible tensor shapes.
         encoder.load_state_dict(state, strict=True)
         encoder.eval()
+        self.encoder_weights_sha256 = file_sha256(weights_path)
 
         logger.info(
-            "Encoder loaded strictly: layers=%d, hidden_size=%d, "
-            "converted_biases=%d, zero_key_biases=%d",
+            "Encoder loaded strictly: layers=%d, hidden_size=%d, weights=%s sha256=%s",
             config.num_hidden_layers,
             config.hidden_size,
-            converted,
-            config.num_hidden_layers,
+            weights_path,
+            self.encoder_weights_sha256[:12],
         )
-        
         return encoder
 
     def _configure_freezing(
@@ -516,6 +534,7 @@ def save_checkpoint(
             "hidden_dim": model.hidden_dim,
             "freeze_backbone": model.freeze_backbone,
             "unfreeze_last_n_blocks": model.unfreeze_last_n_blocks,
+            "encoder_weights_sha256": getattr(model, "encoder_weights_sha256", None),
         },
     }
 

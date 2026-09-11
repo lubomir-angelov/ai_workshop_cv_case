@@ -27,7 +27,10 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from pickup_putdown.layer1.track_b1.dataset import TrackB1Dataset, WindowConfig  # noqa: E402
+from pickup_putdown.layer1.track_b1.dataset_dir import (  # noqa: E402
+    load_dataset_dir,
+    open_window_dataset,
+)
 
 logger = logging.getLogger("inspect_track_b1_windows")
 
@@ -67,11 +70,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset")
     parser.add_argument("--video-dir", type=Path, default=REPO_ROOT / ".local/source_videos")
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / ".local/track_b1_inspection")
+    parser.add_argument("--cache-dir", type=Path, default=REPO_ROOT / ".local/track_b1_cache")
+    parser.add_argument("--frame-cache-dir", type=Path, default=None,
+                        help="deployment mode: read/write this per-window cache (default: decode)")
     parser.add_argument("--per-class", type=int, default=4, help="Windows to render per label")
     parser.add_argument("--split", default="train")
-    parser.add_argument("--num-frames", type=int, default=16)
-    parser.add_argument("--crop-margin", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--compare-source", action="store_true",
+                        help="annotation mode: also decode each window from the source video "
+                             "and fail if it differs from the cached input training uses")
     return parser.parse_args(argv)
 
 
@@ -79,8 +86,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     args = parse_args(argv)
 
-    manifest = pd.read_parquet(args.dataset_dir / "window_manifest.parquet")
-    clips = pd.read_parquet(args.dataset_dir / "clips.parquet")
+    dataset_dir = load_dataset_dir(args.dataset_dir)
+    manifest = dataset_dir.table("window_manifest")
 
     manifest = manifest[manifest["split"] == args.split]
     if manifest.empty:
@@ -95,14 +102,15 @@ def main(argv: list[str] | None = None) -> int:
         ]
     ).reset_index(drop=True)
 
-    dataset = TrackB1Dataset(
-        window_manifest=picked,
-        video_dir=args.video_dir,
-        pose_tracks_dir=args.dataset_dir / "actor_tracks",
-        shelf_regions={},
-        config=WindowConfig(num_frames=args.num_frames, crop_margin=args.crop_margin),
-        clips_df=clips,
+    # The same dataset path training uses, so the grids show the real model input.
+    dataset = open_window_dataset(
+        dataset_dir, picked, args.video_dir, cache_dir=args.cache_dir,
+        frame_cache_dir=args.frame_cache_dir,
     )
+    source = None
+    if args.compare_source and dataset_dir.input_mode == "annotation":
+        source = open_window_dataset(dataset_dir, picked, args.video_dir, from_video=True)
+    worst_difference = 0.0
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     grids: list[np.ndarray] = []
@@ -111,6 +119,11 @@ def main(argv: list[str] | None = None) -> int:
         sample = dataset[index]
         row = picked.iloc[index]
         frames = denormalize(sample["pixel_values"])
+        if source is not None:
+            decoded = denormalize(source[index]["pixel_values"]).astype(int)
+            difference = float(np.abs(decoded - frames.astype(int)).max())
+            worst_difference = max(worst_difference, difference)
+            logger.info("%s: max |cache - source decode| = %.0f", row["sample_id"], difference)
 
         # A window whose frames are all identical means the decode fell back to a
         # repeated frame; that is silent in training but obvious here.
@@ -132,7 +145,13 @@ def main(argv: list[str] | None = None) -> int:
     ]
     cv2.imwrite(str(args.output_dir / "contact_sheet.png"), np.vstack(padded))
 
-    print(f"\nWrote {len(grids)} grids + contact_sheet.png to {args.output_dir}")
+    print(f"\nWrote {len(grids)} grids + contact_sheet.png to {args.output_dir} "
+          f"({dataset_dir.input_mode} inputs)")
+    if source is not None:
+        print(f"max |cached input - fresh source decode| over all windows: {worst_difference:.0f}")
+        if worst_difference > 0:
+            logger.error("cached inputs differ from the source decode; rebuild the cache")
+            return 1
     print("Check: frames advance left-to-right, the actor stays in crop, "
           "and the label matches what the hands do.")
     return 0

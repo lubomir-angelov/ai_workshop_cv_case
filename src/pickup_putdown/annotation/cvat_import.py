@@ -299,7 +299,13 @@ def to_events(
     min_duration_s: float,
     accepted_only: bool,
 ) -> list[dict]:
-    """Canonical Event rows for one clip's pickup/putdown intervals."""
+    """Canonical Event rows for one clip's pickup/putdown intervals.
+
+    ``item_count = N`` yields N rows with the same interval, per
+    docs/LABELING_GUIDELINES.md §5.1 ("do not collapse a two-item action into one
+    canonical event row"); the evaluator's multi-item metrics rely on it. Rows of one
+    interval share ``event_group_id`` and differ in ``item_index``.
+    """
     rows: list[dict] = []
     for interval in clip.intervals:
         if interval.label not in EVENT_LABELS:
@@ -313,22 +319,29 @@ def to_events(
             continue
 
         t_start, t_end = _interval_times(interval, clip.fps, min_duration_s)
-        rows.append(
-            {
-                "event_id": interval.event_id(),
-                "clip_id": clip.clip_id,
-                "type": interval.label,
-                "t_start": t_start,
-                "t_end": t_end,
-                "hard_case": attrs.get("hard_case", "false") == "true",
-                "annotator": "cvat",
-                "confidence": attrs.get("confidence") or DEFAULT_CONFIDENCE,
-                "notes": attrs.get("notes") or None,
-                "actor_id": interval.actor_id,
-                "item_count": int(float(attrs.get("item_count") or 1)),
-                "review_status": review_status,
-            }
-        )
+        item_count = int(float(attrs.get("item_count") or 1))
+        if item_count < 1:
+            raise ValueError(f"{interval.event_id()}: item_count {item_count} < 1")
+        group_id = interval.event_id()
+        for item_index in range(item_count):
+            rows.append(
+                {
+                    "event_id": group_id if item_count == 1 else f"{group_id}__i{item_index}",
+                    "clip_id": clip.clip_id,
+                    "type": interval.label,
+                    "t_start": t_start,
+                    "t_end": t_end,
+                    "hard_case": attrs.get("hard_case", "false") == "true",
+                    "annotator": "cvat",
+                    "confidence": attrs.get("confidence") or DEFAULT_CONFIDENCE,
+                    "notes": attrs.get("notes") or None,
+                    "actor_id": interval.actor_id,
+                    "item_count": item_count,
+                    "review_status": review_status,
+                    "event_group_id": group_id,
+                    "item_index": item_index,
+                }
+            )
     return rows
 
 
@@ -414,6 +427,21 @@ def to_actor_track(clip: ClipAnnotations, context_pad_s: float = 0.0) -> pd.Data
 # ============================================================
 
 
+def normalize_clip_id(raw: str) -> str:
+    """Canonical source-video clip id (``D2_S<start>_E<end>_anon``).
+
+    Pose runs and registries have used ``clip_<id>`` and ``b1_<id>`` (the RUN_ID) as
+    well; mixing them with the CVAT ids silently drops every label join, so they are
+    stripped here and anything that still does not look like a clip stem raises.
+    """
+    clip_id = str(raw)
+    for prefix in ("b1_", "clip_"):
+        clip_id = clip_id.removeprefix(prefix)
+    if CLIP_TIME_RE.search(clip_id) is None:
+        raise ValueError(f"not a source-video clip id: {raw!r}")
+    return clip_id
+
+
 def recording_day(clip_id: str) -> str:
     """Recording day encoded in the clip stem, used as the split grouping key."""
     match = CLIP_TIME_RE.search(clip_id)
@@ -458,6 +486,40 @@ def assign_splits(
     return clips_df
 
 
+def assign_splits_from_registry(
+    clips_df: pd.DataFrame,
+    events_df: pd.DataFrame,
+    day_splits: dict[str, str],
+) -> pd.DataFrame:
+    """Assign splits from an explicit recording-day registry.
+
+    Every clip's day must be listed: a new day is a decision to record in the
+    registry, not something to place automatically.
+    """
+    clips_df = clips_df.copy()
+    clips_df["recording_day"] = clips_df["clip_id"].map(recording_day)
+    events_per_clip = events_df.groupby("clip_id").size() if len(events_df) else pd.Series(dtype=int)
+    clips_df["n_events"] = clips_df["clip_id"].map(events_per_clip).fillna(0).astype(int)
+    unknown = sorted(set(clips_df["recording_day"]) - set(day_splits))
+    if unknown:
+        raise ValueError(f"recording days {unknown} are not in the split registry")
+    invalid = sorted(set(day_splits.values()) - {"train", "val", "test"})
+    if invalid:
+        raise ValueError(f"invalid split names in registry: {invalid}")
+    clips_df["split"] = clips_df["recording_day"].map(day_splits)
+    return clips_df
+
+
+def load_split_registry(path: Path, name: str) -> dict[str, str]:
+    """Day -> split mapping of one named registry in a split-registry YAML file."""
+    import yaml
+
+    registries = (yaml.safe_load(path.read_text()) or {}).get("registries", {})
+    if name not in registries:
+        raise KeyError(f"split registry {name!r} not in {path}; have {sorted(registries)}")
+    return {str(day): split for day, split in registries[name]["days"].items()}
+
+
 # ============================================================
 # TOP-LEVEL IMPORT
 # ============================================================
@@ -474,6 +536,7 @@ class ImportResult:
 EVENT_COLUMNS = [
     "event_id", "clip_id", "type", "t_start", "t_end", "hard_case",
     "annotator", "confidence", "notes", "actor_id", "item_count", "review_status",
+    "event_group_id", "item_index",
 ]
 IGNORE_COLUMNS = [
     "ignore_id", "clip_id", "t_start", "t_end", "reason", "annotator", "notes",
@@ -488,8 +551,13 @@ def import_export_dir(
     context_pad_s: float = 3.0,
     val_days: int = 1,
     test_days: int = 1,
+    day_splits: dict[str, str] | None = None,
 ) -> ImportResult:
-    """Parse every CVAT archive in ``export_dir`` into canonical tables."""
+    """Parse every CVAT archive in ``export_dir`` into canonical tables.
+
+    Splits come from ``day_splits`` (an explicit registry) when given, otherwise
+    from :func:`assign_splits` ranking with ``val_days``/``test_days``.
+    """
     archives = sorted(export_dir.glob("*.zip"))
     if not archives:
         raise ValueError(f"no CVAT archives found in {export_dir}")
@@ -520,7 +588,11 @@ def import_export_dir(
 
     events_df = pd.DataFrame(event_rows, columns=EVENT_COLUMNS)
     ignore_df = pd.DataFrame(ignore_rows, columns=IGNORE_COLUMNS)
-    clips_df = assign_splits(pd.DataFrame(clip_rows), events_df, val_days, test_days)
+    clips_df = (
+        assign_splits_from_registry(pd.DataFrame(clip_rows), events_df, day_splits)
+        if day_splits is not None
+        else assign_splits(pd.DataFrame(clip_rows), events_df, val_days, test_days)
+    )
 
     return ImportResult(
         events=events_df,

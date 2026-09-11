@@ -1,0 +1,43 @@
+# Track B1 recording-day split registries.
+#
+# Splits are by recording day, never by clip: clips recorded minutes apart share
+# shoppers, lighting and shelf state. Every clip's day must be listed in the registry
+# a run uses; build_track_b1_dataset.py fails on an unlisted day instead of placing it.
+#
+# Registries marked "historical" record what past experiments actually used. Do not
+# edit them; add a new registry for a new protocol.
+
+default: cvat_b1_2026_09_09
+
+registries:
+  cvat_b1_2026_09_09:
+    status: historical
+    used_by: feature/cvat_annotation experiments (TRACK_B1_CVAT.md), and the default
+      registry for the combined branch
+    method: cvat_import.assign_splits (days ranked by event count; sparsest -> val,
+      next -> test), reproduced exactly from the 2026-09-09 export
+    days:
+      "20260520": train
+      "20260521": train
+      "20260522": train
+      "20260523": val
+      "20260526": test
+    caveat: >-
+      20260526 is NOT an untouched test day. It was the validation day of
+      human_b1_2026_09_09 (the frozen-head baseline was selected on it, and its
+      windows were reviewed by hand), and the CVAT branch read it twice (frozen
+      probe and fine-tuned). Treat it as a second development day; a clean held-out
+      estimate needs new recording days or grouped cross-validation over days.
+
+  human_b1_2026_09_09:
+    status: historical
+    used_by: feature/human_annotation_track_b frozen-head baseline
+      (.local/track_b1_output_human, best epoch 6, val macro F1 0.4240668)
+    method: scripts/prepare_track_b1_data.py assign_splits (days ranked by
+      sha256("b1-human-2026-09-09:<day>"), lowest 20% -> val)
+    days:
+      "20260520": train
+      "20260521": train
+      "20260522": train
+      "20260523": train
+      "20260526": val

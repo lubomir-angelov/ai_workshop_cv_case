@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Run Track B1 sliding-window inference over the cached candidates and evaluate it.
+"""Score Track B1 windows, decode events and evaluate them, in either input mode.
 
-    python scripts/infer_track_b1.py --split val --checkpoint .local/track_b1_run/checkpoints/best.pt
+    python scripts/infer_track_b1.py --dataset-dir .local/track_b1_dataset \
+        --checkpoint .local/track_b1_run/checkpoints/head_best.pt --split val
+    python scripts/infer_track_b1.py --dataset-dir .local/track_b1_dataset_deploy \
+        --checkpoint .local/track_b1_run/checkpoints/head_best.pt --split val
 
-Windows are scored from the crop cache, class probabilities are smoothed over time,
-score peaks are turned into regions, and only same-type regions are merged — a pickup
-and an adjacent putdown stay two events, which is the behaviour Task 12 asks for.
+Windows come from the dataset's candidates (CVAT-derived in annotation mode, pose
+proposals in deployment mode) and are scored through the same pixel path as
+training. Class probabilities are smoothed, turned into regions, merged only with
+the same type (a pickup next to a putdown stays two events), and same-type duplicates
+of one actor from overlapping candidates are suppressed.
 
-Predictions are written in canonical form and, when ground truth is available for the
-split, scored with the shared Task 8 evaluator.
+Evaluation uses the shared Task 8 evaluator against every reviewed event of the
+split's clips, including events no candidate covers and clips with no events, so
+proposal misses count as false negatives. Candidate coverage is reported separately.
+Annotation-mode results are annotation-conditioned and are labelled as such.
 """
 
 from __future__ import annotations
@@ -17,27 +24,28 @@ import argparse
 import json
 import logging
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
+import yaml
+from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from pickup_putdown.layer1.track_b1.cache import load_cache_index  # noqa: E402
-from pickup_putdown.layer1.track_b1.dataset import (  # noqa: E402
-    generate_inference_windows_for_candidate,
-    normalize_frames,
+from pickup_putdown.layer1.track_b1.dataset import generate_inference_windows  # noqa: E402
+from pickup_putdown.layer1.track_b1.dataset_dir import (  # noqa: E402
+    load_dataset_dir,
+    open_window_dataset,
 )
 from pickup_putdown.layer1.track_b1.inference import (  # noqa: E402
     InferenceConfig,
-    WindowPrediction,
-    create_event_predictions,
-    detect_score_peaks,
-    merge_same_type_regions,
-    smooth_predictions,
+    decode_window_scores,
+    evaluate_events,
+    suppress_duplicate_events,
 )
 from pickup_putdown.layer1.track_b1.videomae_classifier import (  # noqa: E402
     _resolve_device,
@@ -45,268 +53,164 @@ from pickup_putdown.layer1.track_b1.videomae_classifier import (  # noqa: E402
     load_checkpoint,
 )
 
+logger = logging.getLogger("infer_track_b1")
 
-def load_into(model, checkpoint_path: Path, device: torch.device) -> None:
-    """Load either a full-model checkpoint or a head-only one into ``model``.
+DECODE_KEYS = ("pickup_threshold", "putdown_threshold", "smoothing_window",
+               "same_type_merge_gap_s", "min_event_duration_s", "boundary_mode")
 
-    The head trainer works on cached embeddings and so only ever sees the head; its
-    checkpoint carries ``head_state_dict``. The pixel-path trainer saves the whole
-    model. Both are valid Track B1 models — the backbone is the same frozen
-    pretrained encoder in either case — so inference accepts both.
+
+def load_into(model, checkpoint_path: Path, device: torch.device) -> dict:
+    """Load a full-model or head-only checkpoint into ``model``; return its record.
+
+    The head trainer only ever sees cached embeddings and saves ``head_state_dict``;
+    the pixel-path trainer saves the whole model. Both load strictly.
     """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if "head_state_dict" in checkpoint:
-        model.head.load_state_dict(checkpoint["head_state_dict"])
-        logger.info(
-            "loaded head-only checkpoint (epoch %s, val macro F1 %.4f)",
-            checkpoint.get("epoch"), checkpoint.get("val_f1_macro", float("nan")),
-        )
-    else:
-        load_checkpoint(checkpoint_path, model, device=str(device))
-
-logger = logging.getLogger("infer_track_b1")
-
-
-def score_candidate_windows(
-    model,
-    entry,
-    windows,
-    num_frames: int,
-    batch_size: int,
-    device: torch.device,
-) -> list[WindowPrediction]:
-    """Score one candidate's windows straight out of its cached frames."""
-    if not windows:
-        return []
-
-    frames_array = np.load(entry.array_path, mmap_mode="r")
-    tensors = []
-    for window in windows:
-        start_frame = int(window.window_start_s * entry.fps)
-        end_frame = max(start_frame + 1, int(window.window_end_s * entry.fps))
-        wanted = np.linspace(start_frame, end_frame - 1, num_frames)
-        positions = [entry.frame_position(int(f)) for f in wanted]
-        tensors.append(normalize_frames(np.asarray(frames_array[positions])))
-
-    predictions: list[WindowPrediction] = []
-    model.eval()
-    with torch.no_grad():
-        for start in range(0, len(tensors), batch_size):
-            batch = torch.stack(tensors[start : start + batch_size]).to(device)
-            probs = torch.softmax(model(batch), dim=-1).cpu().numpy()
-            for offset, window_probs in enumerate(probs):
-                window = windows[start + offset]
-                predicted = int(np.argmax(window_probs))
-                predictions.append(
-                    WindowPrediction(
-                        window_start_s=window.window_start_s,
-                        window_end_s=window.window_end_s,
-                        window_center_s=(window.window_start_s + window.window_end_s) / 2,
-                        probs=window_probs,
-                        predicted_class=predicted,
-                        confidence=float(window_probs[predicted]),
-                    )
-                )
-    return predictions
+        model.head.load_state_dict(checkpoint["head_state_dict"], strict=True)
+        return {"kind": "head_only", "epoch": checkpoint.get("epoch"),
+                "input_mode": checkpoint.get("input_mode")}
+    load_checkpoint(checkpoint_path, model, device=str(device), strict=True)
+    return {"kind": "full_model", "epoch": checkpoint.get("epoch"),
+            "model_config": checkpoint.get("model_config")}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset")
-    parser.add_argument("--cache-dir", type=Path, default=REPO_ROOT / ".local/track_b1_cache")
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / ".local/track_b1_run/predictions")
+    parser.add_argument("--video-dir", type=Path, default=REPO_ROOT / ".local/source_videos")
+    parser.add_argument("--cache-dir", type=Path, default=REPO_ROOT / ".local/track_b1_cache")
+    parser.add_argument("--frame-cache-dir", type=Path, default=REPO_ROOT / ".local/track_b1_frame_cache")
+    parser.add_argument("--output-dir", type=Path, default=None,
+                        help="default: <checkpoint dir>/../predictions_<input mode>")
     parser.add_argument("--split", default="val", choices=["train", "val", "test"])
-
+    parser.add_argument("--clips", nargs="+", default=None, help="restrict to these clip ids (smoke runs)")
+    parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs/track_b1.yaml",
+                        help="inference section supplies decode defaults")
     parser.add_argument("--model-name", default="MCG-NJU/videomae-base")
-    parser.add_argument("--num-frames", type=int, default=16)
-    parser.add_argument("--window-duration-s", type=float, default=2.5)
-    parser.add_argument("--window-stride-s", type=float, default=0.5)
-    parser.add_argument("--pickup-threshold", type=float, default=0.5)
-    parser.add_argument("--putdown-threshold", type=float, default=0.5)
-    parser.add_argument("--smoothing-window", type=int, default=3)
-    parser.add_argument("--same-type-merge-gap-s", type=float, default=0.75)
-    parser.add_argument("--min-event-duration-s", type=float, default=0.3)
-    parser.add_argument("--boundary-mode", default="window_centers",
-                        choices=["window_span", "window_centers"],
-                        help="How a run of above-threshold windows becomes an interval")
+    parser.add_argument("--pickup-threshold", type=float, default=None)
+    parser.add_argument("--putdown-threshold", type=float, default=None)
+    parser.add_argument("--smoothing-window", type=int, default=None)
+    parser.add_argument("--same-type-merge-gap-s", type=float, default=None)
+    parser.add_argument("--min-event-duration-s", type=float, default=None)
+    parser.add_argument("--boundary-mode", default=None, choices=["window_span", "window_centers"])
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--tiou", type=float, nargs="+", default=[0.3, 0.5])
     return parser.parse_args(argv)
 
 
+def inference_config(args: argparse.Namespace, window: dict) -> InferenceConfig:
+    """Decode settings: config file ``inference`` section, then explicit CLI flags."""
+    section = (yaml.safe_load(args.config.read_text()) or {}).get("inference") or {}
+    values = {k: section[k] for k in DECODE_KEYS if k in section}
+    values.update({k: getattr(args, k) for k in DECODE_KEYS if getattr(args, k) is not None})
+    window_values = {k: window[k] for k in ("window_duration_s", "window_stride_s", "num_frames",
+                                            "image_size", "crop_margin", "crop_scope",
+                                            "resize_interpolation", "include_shelf_region")}
+    return InferenceConfig(**window_values, **values, batch_size=args.batch_size)
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = parse_args(argv)
+    dataset_dir = load_dataset_dir(args.dataset_dir)
+    mode = dataset_dir.input_mode
+    config = inference_config(args, dataset_dir.metadata["window"])
 
-    clips = pd.read_parquet(args.dataset_dir / "clips.parquet")
-    candidates = pd.read_parquet(args.dataset_dir / "candidates.parquet")
-    events = pd.read_parquet(args.dataset_dir / "events.parquet")
-    ignores = pd.read_parquet(args.dataset_dir / "ignore_intervals.parquet")
-
-    split_clips = set(clips[clips["split"] == args.split]["clip_id"])
+    clips = dataset_dir.table("clips")
+    split_clips = set(clips.loc[clips["split"] == args.split, "clip_id"])
+    if args.clips:
+        split_clips &= set(args.clips)
+    candidates = dataset_dir.table("candidates")
     candidates = candidates[candidates["clip_id"].isin(split_clips)]
-    if candidates.empty:
-        logger.error("no candidates in split %s", args.split)
+
+    windows = generate_inference_windows(candidates, config.to_window_config())
+    window_table = pd.DataFrame([w.to_dict() for w in windows])
+    if window_table.empty:
+        logger.error("no inference windows in split %s", args.split)
         return 1
+    window_table["sample_id"] = [f"inf_{i:06d}" for i in range(len(window_table))]
+    window_table["label"] = -1  # inference windows carry no label
+    dataset = open_window_dataset(
+        dataset_dir, window_table, args.video_dir, cache_dir=args.cache_dir,
+        frame_cache_dir=args.frame_cache_dir,
+    )
 
-    cache_index = load_cache_index(args.cache_dir)
     device = _resolve_device(args.device)
+    model = create_model(model_name=args.model_name, num_classes=3, freeze_backbone=True, device=args.device)
+    checkpoint_info = load_into(model, args.checkpoint, device)
+    if checkpoint_info.get("input_mode") not in (None, mode):
+        logger.warning("checkpoint trained in %s mode, evaluated on %s inputs",
+                       checkpoint_info["input_mode"], mode)
+    model.eval()
 
-    model = create_model(
-        model_name=args.model_name, num_classes=3, freeze_backbone=True, device=args.device
-    )
-    load_into(model, args.checkpoint, device)
-    logger.info("loaded checkpoint %s", args.checkpoint)
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
+                        multiprocessing_context="spawn" if args.num_workers else None)
+    probabilities: list[np.ndarray] = []
+    with torch.inference_mode():
+        for step, batch in enumerate(loader, start=1):
+            probabilities.append(torch.softmax(model(batch["pixel_values"].to(device)), dim=-1).cpu().numpy())
+            if step % 25 == 0 or step == len(loader):
+                logger.info("  %d/%d batches", step, len(loader))
+    probs = np.concatenate(probabilities)
+    scores = dataset.manifest[["clip_id", "candidate_id", "actor_id", "window_start_s", "window_end_s"]].copy()
+    scores[["p_background", "p_pickup", "p_putdown"]] = probs
 
-    config = InferenceConfig(
-        window_duration_s=args.window_duration_s,
-        window_stride_s=args.window_stride_s,
-        num_frames=args.num_frames,
-        pickup_threshold=args.pickup_threshold,
-        putdown_threshold=args.putdown_threshold,
-        smoothing_window=args.smoothing_window,
-        same_type_merge_gap_s=args.same_type_merge_gap_s,
-        min_event_duration_s=args.min_event_duration_s,
-        boundary_mode=args.boundary_mode,
-        batch_size=args.batch_size,
-    )
-    window_config = config.to_window_config()
+    decoded = decode_window_scores(scores, config)
+    predictions, n_suppressed = suppress_duplicate_events(decoded)
 
-    all_events: list[dict] = []
-    window_rows: list[dict] = []
-    skipped = 0
+    out = args.output_dir or args.checkpoint.parent.parent / f"predictions_{mode}"
+    out.mkdir(parents=True, exist_ok=True)
+    scores.to_parquet(out / f"window_scores_{args.split}.parquet", index=False)
+    predictions.to_csv(out / f"predictions_{args.split}.csv", index=False)
 
-    for position, (_, candidate) in enumerate(candidates.iterrows(), start=1):
-        entry = cache_index.get(candidate["candidate_id"])
-        if entry is None:
-            skipped += 1
-            continue
-
-        windows = generate_inference_windows_for_candidate(candidate, window_config)
-        predictions = score_candidate_windows(
-            model, entry, windows, args.num_frames, args.batch_size, device
-        )
-        if not predictions:
-            continue
-
-        for prediction in predictions:
-            window_rows.append(
-                {
-                    "clip_id": candidate["clip_id"],
-                    "candidate_id": candidate["candidate_id"],
-                    "actor_id": candidate["actor_id"],
-                    "window_start_s": prediction.window_start_s,
-                    "window_end_s": prediction.window_end_s,
-                    "p_background": prediction.background_prob,
-                    "p_pickup": prediction.pickup_prob,
-                    "p_putdown": prediction.putdown_prob,
-                }
-            )
-
-        smoothed = smooth_predictions(predictions, config.smoothing_window)
-        regions = detect_score_peaks(smoothed, config)
-        merged = merge_same_type_regions(
-            regions, config.same_type_merge_gap_s, config.min_event_duration_s
-        )
-        detected = create_event_predictions(
-            merged, candidate["clip_id"], candidate["candidate_id"], candidate["actor_id"], config
-        )
-        all_events.extend(event.to_dict() for event in detected)
-
-        if position % 25 == 0:
-            logger.info("  %d/%d candidates scored", position, len(candidates))
-
-    predictions_df = pd.DataFrame(all_events)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    predictions_path = args.output_dir / f"predictions_{args.split}.csv"
-    predictions_df.to_csv(predictions_path, index=False)
-    pd.DataFrame(window_rows).to_parquet(
-        args.output_dir / f"window_scores_{args.split}.parquet", index=False
-    )
-
-    print(f"\n{len(predictions_df)} predicted events from {len(candidates)} candidates "
-          f"({skipped} uncached) -> {predictions_path}")
-    if not predictions_df.empty:
-        print("by type:", predictions_df["type"].value_counts().to_dict())
-
+    events = dataset_dir.table("events")
+    ignores = dataset_dir.table("ignore_intervals")
     ground_truth = events[events["clip_id"].isin(split_clips)]
-    print(f"ground truth in {args.split}: {len(ground_truth)} events "
-          f"{ground_truth['type'].value_counts().to_dict()}")
+    durations = {c: float(d) for c, d in zip(clips["clip_id"], clips["duration_s"], strict=True) if c in split_clips}
+    metrics = evaluate_events(predictions, ground_truth, ignores[ignores["clip_id"].isin(split_clips)],
+                              durations, tuple(args.tiou))
 
-    split_ignores = ignores[ignores["clip_id"].isin(split_clips)]
-    metrics = evaluate(predictions_df, ground_truth, split_ignores, clips, args)
-    (args.output_dir / f"metrics_{args.split}.json").write_text(json.dumps(metrics, indent=2))
-    return 0
+    coverage = dataset_dir.table("candidate_coverage")
+    coverage = coverage[coverage["clip_id"].isin(split_clips)]
+    record = {
+        "input_mode": mode,
+        "annotation_conditioned": mode == "annotation",
+        "split": args.split,
+        "n_clips": len(split_clips),
+        "n_clips_without_events": len(split_clips - set(ground_truth["clip_id"])),
+        "n_ground_truth_event_rows": int(len(ground_truth)),
+        "n_candidates": int(len(candidates)),
+        "n_windows": int(len(scores)),
+        "n_predictions": int(len(predictions)),
+        "n_suppressed_duplicates": n_suppressed,
+        "candidate_coverage": coverage["coverage"].value_counts().to_dict(),
+        "checkpoint": str(args.checkpoint),
+        "checkpoint_info": checkpoint_info,
+        "dataset_dir": str(dataset_dir.path),
+        "split_registry": dataset_dir.metadata["split_registry"]["name"],
+        "preprocessing": dataset_dir.metadata["preprocessing"],
+        "decode": {k: v for k, v in asdict(config).items() if k in DECODE_KEYS},
+        "event_metrics": metrics,
+    }
+    (out / f"metrics_{args.split}.json").write_text(json.dumps(record, indent=2, default=str))
 
-
-def evaluate(
-    predictions_df: pd.DataFrame,
-    ground_truth: pd.DataFrame,
-    ignore_df: pd.DataFrame,
-    clips: pd.DataFrame,
-    args,
-) -> dict:
-    """Score predictions with the shared Task 8 evaluator."""
-    from pickup_putdown.evaluation.contracts import (
-        EvaluationEvent,
-        EvaluationIgnoreInterval,
-        EvaluationPrediction,
-    )
-    from pickup_putdown.evaluation.metrics import aggregate_metrics
-
-    truth = [
-        EvaluationEvent(
-            event_id=row.event_id, clip_id=row.clip_id, type=row.type,
-            t_start=float(row.t_start), t_end=float(row.t_end),
-            confidence=row.confidence, hard_case=bool(row.hard_case),
-        )
-        for row in ground_truth.itertuples()
-    ]
-    predicted = (
-        [
-            EvaluationPrediction(
-                pred_id=row.pred_id, clip_id=row.clip_id, type=row.type,
-                t_start=float(row.t_start), t_end=float(row.t_end),
-                score=float(row.score), model=row.model,
-            )
-            for row in predictions_df.itertuples()
-        ]
-        if not predictions_df.empty
-        else []
-    )
-    ignores = [
-        EvaluationIgnoreInterval(
-            clip_id=row.clip_id, t_start=float(row.t_start), t_end=float(row.t_end)
-        )
-        for row in ignore_df.itertuples()
-    ]
-    clip_durations = dict(zip(clips["clip_id"], clips["duration_s"].astype(float)))
-
-    results = aggregate_metrics(
-        events=truth,
-        preds=predicted,
-        clip_durations=clip_durations,
-        ignores=ignores,
-        tiou_thresholds=tuple(args.tiou),
-    )
-
-    print("\nEvaluation (shared Task 8 evaluator):")
+    label = "ANNOTATION-CONDITIONED (GT candidates/crops)" if mode == "annotation" else "DEPLOYMENT-INPUT (pose candidates/crops)"
+    print(f"\n[{label}] split={args.split} clips={len(split_clips)} "
+          f"GT event rows={len(ground_truth)} predictions={len(predictions)} "
+          f"(suppressed duplicates={n_suppressed})")
+    print(f"candidate coverage of GT events: {record['candidate_coverage']}")
     for tiou in args.tiou:
-        row = results.get(f"tiou@{tiou}", {})
-        print(
-            f"  tIoU {tiou}: P={row.get('precision', 0):.3f} R={row.get('recall', 0):.3f} "
-            f"F1={row.get('f1', 0):.3f}  (tp={row.get('tp')} fp={row.get('fp')} fn={row.get('fn')})"
-        )
-    for event_type, row in (results.get("per_type") or {}).items():
-        print(
-            f"  {event_type:8s}: P={row.get('precision', 0):.3f} R={row.get('recall', 0):.3f} "
-            f"F1={row.get('f1', 0):.3f}"
-        )
-    if results.get("start_mae_s") is not None:
-        print(f"  boundary MAE: start={results['start_mae_s']:.2f}s end={results['end_mae_s']:.2f}s")
-    return results
+        row = metrics[f"tiou@{tiou}"]
+        print(f"  tIoU {tiou}: P={row['precision']:.3f} R={row['recall']:.3f} F1={row['f1']:.3f} "
+              f"(tp={row['tp']} fp={row['fp']} fn={row['fn']})")
+    for event_type, row in metrics["per_type"].items():
+        print(f"  {event_type:8s}: P={row['precision']:.3f} R={row['recall']:.3f} F1={row['f1']:.3f}")
+    print(f"-> {out}")
+    return 0
 
 
 if __name__ == "__main__":

@@ -29,7 +29,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from pickup_putdown.layer1.track_b1.dataset import LABEL_NAMES  # noqa: E402
-from pickup_putdown.layer1.track_b1.videomae_classifier import ClassificationHead  # noqa: E402
+from pickup_putdown.layer1.track_b1.dataset_dir import load_dataset_dir  # noqa: E402
+from pickup_putdown.layer1.track_b1.embeddings import load_embeddings_for  # noqa: E402
+from pickup_putdown.layer1.track_b1.videomae_classifier import (  # noqa: E402
+    ClassificationHead,
+    file_sha256,
+    resolve_weights_path,
+)
 
 logger = logging.getLogger("train_track_b1_head")
 
@@ -85,7 +91,12 @@ def gate_b(head: nn.Module, features: torch.Tensor, labels: torch.Tensor, device
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--embeddings-dir", type=Path, default=REPO_ROOT / ".local/track_b1_embeddings")
+    parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / ".local/track_b1_dataset",
+                        help="labels/splits come from this dataset's window manifest")
+    parser.add_argument("--embeddings-dir", type=Path, default=None,
+                        help="default: <dataset-dir>/embeddings")
+    parser.add_argument("--model-name", default="MCG-NJU/videomae-base",
+                        help="pretrained encoder the embeddings must come from")
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / ".local/track_b1_run")
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -105,11 +116,16 @@ def main(argv: list[str] | None = None) -> int:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    embeddings = np.load(args.embeddings_dir / "embeddings.npy")
-    manifest = pd.read_parquet(args.embeddings_dir / "manifest.parquet")
-    if len(embeddings) != len(manifest):
-        logger.error("embeddings (%d) and manifest (%d) disagree", len(embeddings), len(manifest))
-        return 1
+    dataset_dir = load_dataset_dir(args.dataset_dir)
+    embeddings_dir = args.embeddings_dir or dataset_dir.path / "embeddings"
+    manifest = dataset_dir.table("window_manifest")
+    manifest = manifest[manifest["split"].isin(["train", "val"])].reset_index(drop=True)
+    encoder_sha = file_sha256(resolve_weights_path(args.model_name))
+    embeddings, embedding_metadata = load_embeddings_for(
+        manifest, embeddings_dir, dataset_dir.metadata["preprocessing"], encoder_sha
+    )
+    logger.info("input mode %s: %d windows with cached frozen-encoder features",
+                dataset_dir.input_mode, len(manifest))
 
     device = torch.device(args.device)
     features = torch.from_numpy(embeddings).float()
@@ -189,18 +205,28 @@ def main(argv: list[str] | None = None) -> int:
             "dropout": args.dropout,
             "epoch": best_epoch,
             "val_f1_macro": final_f1,
-            "metadata": json.loads((args.embeddings_dir / "metadata.json").read_text()),
+            "metadata": embedding_metadata,
+            "input_mode": dataset_dir.input_mode,
+            "dataset_dir": str(dataset_dir.path),
+            "encoder_weights_sha256": encoder_sha,
         },
         checkpoint_dir / "head_best.pt",
     )
     pd.DataFrame(history).to_csv(args.output_dir / "head_training_history.csv", index=False)
     np.save(args.output_dir / "val_probs.npy", val_probs)
+    # Keyed per-window export: provenance survives any reordering of the manifest.
+    val_rows = manifest[val_mask].reset_index(drop=True)
+    val_rows = val_rows.assign(pred_id=val_probs.argmax(axis=1),
+                               p_background=val_probs[:, 0], p_pickup=val_probs[:, 1],
+                               p_putdown=val_probs[:, 2])
+    val_rows.to_csv(args.output_dir / "val_window_predictions.csv", index=False)
     (args.output_dir / "head_results.json").write_text(
         json.dumps(
             {
                 "best_epoch": best_epoch,
                 "val_f1_macro": final_f1,
                 "val_f1_per_class": final_per_class,
+                "input_mode": dataset_dir.input_mode,
                 "n_train": int(len(x_train)),
                 "n_val": int(len(x_val)),
                 "class_weights": class_weights.tolist(),

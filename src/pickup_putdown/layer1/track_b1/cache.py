@@ -19,6 +19,7 @@ size and only the motion inside the box distinguishes the classes.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -31,14 +32,52 @@ import pandas as pd
 from torch.utils.data import Dataset
 
 from pickup_putdown.layer1.track_b1.dataset import (
+    INTERPOLATIONS,
+    WindowConfig,
     _apply_margin_and_clamp,
+    _file_fingerprint,
     _union_actor_boxes,
     normalize_frames,
+    preprocessing_spec,
 )
 
 logger = logging.getLogger(__name__)
 
-CACHE_VERSION = 2
+# v3: entries carry a fingerprint (source video, actor-track boxes, candidate span,
+# preprocessing) and are rebuilt when it no longer matches.
+CACHE_VERSION = 3
+
+BOX_COLUMNS = ["timestamp_s", "person_bbox_x1", "person_bbox_y1", "person_bbox_x2", "person_bbox_y2"]
+
+
+def cache_preprocessing(config: WindowConfig) -> dict:
+    """Preprocessing that determines cached pixels. ``num_frames`` is applied at read time."""
+    if config.crop_scope != "candidate":
+        raise ValueError(
+            "the per-candidate cache crops once per candidate; it needs "
+            f"crop_scope='candidate', got {config.crop_scope!r}"
+        )
+    return {k: v for k, v in preprocessing_spec(config).items() if k != "num_frames"}
+
+
+def candidate_fingerprint(
+    candidate: pd.Series,
+    actor_track: pd.DataFrame,
+    video_path: Path,
+    config: WindowConfig,
+) -> dict:
+    """Everything a cached candidate's pixels depend on. Labels are not part of it."""
+    boxes = actor_track.reindex(columns=BOX_COLUMNS).sort_values("timestamp_s")
+    track_hash = hashlib.sha256(
+        pd.util.hash_pandas_object(boxes, index=False).to_numpy().tobytes()
+    ).hexdigest()
+    return {
+        "cache_version": CACHE_VERSION,
+        "video": _file_fingerprint(video_path),
+        "track_sha256": track_hash,
+        "span": [float(candidate["window_start_s"]), float(candidate["window_end_s"])],
+        "preprocessing": cache_preprocessing(config),
+    }
 
 
 @dataclass
@@ -53,6 +92,7 @@ class CachedCandidate:
     fps: float
     crop_box: tuple[int, int, int, int]
     array_path: Path
+    fingerprint: dict | None = None
 
     def frame_position(self, frame_index: int) -> int:
         """Position of a source frame inside the cached array, clamped to its range."""
@@ -79,28 +119,24 @@ def build_candidate_cache(
     actor_track: pd.DataFrame,
     video_path: Path,
     output_dir: Path,
-    image_size: tuple[int, int],
-    crop_margin: float,
+    config: WindowConfig,
     overwrite: bool = False,
 ) -> Optional[CachedCandidate]:
-    """Decode, crop and cache one candidate's frames. Returns None if it cannot be read."""
+    """Decode, crop and cache one candidate's frames. Returns None if it cannot be read.
+
+    An existing entry is reused only when its fingerprint (video, track boxes, span,
+    preprocessing) matches; otherwise it is rebuilt.
+    """
     candidate_id = candidate["candidate_id"]
     array_path = output_dir / f"{candidate_id}.npy"
     meta_path = output_dir / f"{candidate_id}.json"
+    expected = candidate_fingerprint(candidate, actor_track, video_path, config)
 
     if not overwrite and array_path.exists() and meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        if meta.get("cache_version") == CACHE_VERSION:
-            return CachedCandidate(
-                candidate_id=candidate_id,
-                clip_id=meta["clip_id"],
-                actor_id=meta["actor_id"],
-                start_frame=meta["start_frame"],
-                n_frames=meta["n_frames"],
-                fps=meta["fps"],
-                crop_box=tuple(meta["crop_box"]),
-                array_path=array_path,
-            )
+        entry = _entry_from_meta(json.loads(meta_path.read_text()), array_path)
+        if entry is not None and entry.fingerprint == expected:
+            return entry
+        logger.info("rebuilding stale cache entry %s", candidate_id)
 
     if not video_path.exists():
         logger.error("video not found: %s", video_path)
@@ -122,7 +158,7 @@ def build_candidate_cache(
         start_s = float(candidate["window_start_s"])
         end_s = float(candidate["window_end_s"])
         crop_box = candidate_crop_box(
-            actor_track, start_s, end_s, crop_margin, (frame_w, frame_h)
+            actor_track, start_s, end_s, config.crop_margin, (frame_w, frame_h)
         )
         x1, y1, x2, y2 = crop_box
         if x2 <= x1 or y2 <= y1:
@@ -132,6 +168,8 @@ def build_candidate_cache(
         start_frame = max(0, int(np.floor(start_s * fps)))
         end_frame = int(np.ceil(end_s * fps))
         n_frames = max(1, end_frame - start_frame + 1)
+        image_size = tuple(config.image_size)
+        interpolation = INTERPOLATIONS[config.resize_interpolation]
 
         # One seek, then a sequential run: the only access pattern this codec is fast at.
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -149,7 +187,7 @@ def build_candidate_cache(
                     break
                 frames[position] = last
                 continue
-            tile = cv2.resize(frame[y1:y2, x1:x2], image_size, interpolation=cv2.INTER_AREA)
+            tile = cv2.resize(frame[y1:y2, x1:x2], image_size, interpolation=interpolation)
             frames[position] = tile
             last = tile
             decoded += 1
@@ -164,60 +202,81 @@ def build_candidate_cache(
 
         output_dir.mkdir(parents=True, exist_ok=True)
         np.save(array_path, frames)
-        meta_path.write_text(
-            json.dumps(
-                {
-                    "cache_version": CACHE_VERSION,
-                    "candidate_id": candidate_id,
-                    "clip_id": candidate["clip_id"],
-                    "actor_id": candidate["actor_id"],
-                    "start_frame": start_frame,
-                    "n_frames": n_frames,
-                    "n_decoded": decoded,
-                    "fps": fps,
-                    "crop_box": list(crop_box),
-                    "image_size": list(image_size),
-                    "crop_margin": crop_margin,
-                },
-                indent=2,
-            )
-        )
-
-        return CachedCandidate(
-            candidate_id=candidate_id,
-            clip_id=candidate["clip_id"],
-            actor_id=candidate["actor_id"],
-            start_frame=start_frame,
-            n_frames=n_frames,
-            fps=fps,
-            crop_box=crop_box,
-            array_path=array_path,
-        )
+        meta = {
+            "cache_version": CACHE_VERSION,
+            "candidate_id": candidate_id,
+            "clip_id": candidate["clip_id"],
+            "actor_id": candidate["actor_id"],
+            "start_frame": start_frame,
+            "n_frames": n_frames,
+            "n_decoded": decoded,
+            "fps": fps,
+            "crop_box": list(crop_box),
+            "fingerprint": expected,
+        }
+        meta_path.write_text(json.dumps(meta, indent=2))
+        return _entry_from_meta(meta, array_path)
     finally:
         cap.release()
 
 
+def _entry_from_meta(meta: dict, array_path: Path) -> CachedCandidate | None:
+    if meta.get("cache_version") != CACHE_VERSION:
+        return None
+    return CachedCandidate(
+        candidate_id=meta["candidate_id"],
+        clip_id=meta["clip_id"],
+        actor_id=meta["actor_id"],
+        start_frame=meta["start_frame"],
+        n_frames=meta["n_frames"],
+        fps=meta["fps"],
+        crop_box=tuple(meta["crop_box"]),
+        array_path=array_path,
+        fingerprint=meta.get("fingerprint"),
+    )
+
+
 def load_cache_index(cache_dir: Path) -> dict[str, CachedCandidate]:
-    """Read every candidate cache entry written under ``cache_dir``."""
+    """Read every current-version candidate cache entry written under ``cache_dir``."""
     index: dict[str, CachedCandidate] = {}
     for meta_path in sorted(cache_dir.glob("*.json")):
         meta = json.loads(meta_path.read_text())
-        if meta.get("cache_version") != CACHE_VERSION:
+        array_path = cache_dir / f"{meta.get('candidate_id')}.npy"
+        entry = _entry_from_meta(meta, array_path)
+        if entry is None or not array_path.exists():
             continue
-        array_path = cache_dir / f"{meta['candidate_id']}.npy"
-        if not array_path.exists():
-            continue
-        index[meta["candidate_id"]] = CachedCandidate(
-            candidate_id=meta["candidate_id"],
-            clip_id=meta["clip_id"],
-            actor_id=meta["actor_id"],
-            start_frame=meta["start_frame"],
-            n_frames=meta["n_frames"],
-            fps=meta["fps"],
-            crop_box=tuple(meta["crop_box"]),
-            array_path=array_path,
-        )
+        index[entry.candidate_id] = entry
     return index
+
+
+def find_stale_entries(
+    candidates: pd.DataFrame,
+    tracks_dir: Path,
+    video_dir: Path,
+    cache_dir: Path,
+    config: WindowConfig,
+) -> list[str]:
+    """Candidate ids whose cache entry is missing or no longer matches its inputs.
+
+    Cheap (hashes track rows and stats videos, never decodes), so every consumer of
+    the cache can check it before trusting cached pixels.
+    """
+    index = load_cache_index(cache_dir)
+    tracks: dict[str, pd.DataFrame] = {}
+    stale: list[str] = []
+    for _, candidate in candidates.iterrows():
+        clip_id = candidate["clip_id"]
+        if clip_id not in tracks:
+            tracks[clip_id] = pd.read_parquet(tracks_dir / f"{clip_id}.parquet")
+        track = tracks[clip_id]
+        track = track[track["actor_id"] == candidate["actor_id"]]
+        entry = index.get(candidate["candidate_id"])
+        expected = candidate_fingerprint(
+            candidate, track, video_dir / f"{clip_id}.mp4", config
+        )
+        if entry is None or entry.fingerprint != expected:
+            stale.append(candidate["candidate_id"])
+    return stale
 
 
 # ============================================================
@@ -240,16 +299,39 @@ class CachedTrackB1Dataset(Dataset):
         cache_dir: Path,
         num_frames: int = 16,
         transform: Optional[Callable] = None,
+        config: WindowConfig | None = None,
+        require_complete: bool = False,
     ) -> None:
+        """``config`` (when given) must match the preprocessing the cache was built
+        with; ``require_complete`` raises instead of dropping uncached windows, so a
+        run cannot silently train or evaluate on a different example set."""
         self.cache_dir = Path(cache_dir)
-        self.num_frames = num_frames
+        self.num_frames = config.num_frames if config is not None else num_frames
         self.transform = transform
         self.index = load_cache_index(self.cache_dir)
+
+        if config is not None:
+            wanted = cache_preprocessing(config)
+            mismatched = [
+                cid for cid, entry in self.index.items()
+                if (entry.fingerprint or {}).get("preprocessing") != wanted
+            ]
+            if mismatched:
+                raise ValueError(
+                    f"{len(mismatched)} cache entries in {self.cache_dir} were built with "
+                    f"different preprocessing than {wanted} (e.g. {mismatched[:3]}); "
+                    "rebuild with scripts/build_track_b1_cache.py"
+                )
 
         manifest = window_manifest.reset_index(drop=True)
         known = manifest["candidate_id"].isin(self.index)
         if not known.all():
             missing = sorted(set(manifest.loc[~known, "candidate_id"]))
+            if require_complete:
+                raise ValueError(
+                    f"{int((~known).sum())} windows from {len(missing)} candidates are "
+                    f"not cached (e.g. {missing[:3]})"
+                )
             logger.warning(
                 "dropping %d windows from %d uncached candidates (e.g. %s)",
                 int((~known).sum()), len(missing), missing[:3],

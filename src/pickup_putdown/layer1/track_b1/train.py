@@ -17,6 +17,7 @@ Training pipeline:
 
 from __future__ import annotations
 
+import copy
 import logging
 import time
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ from pickup_putdown.layer1.track_b1.dataset import (
     build_window_manifest,
     create_dataloaders,
     get_label_weights,
+    load_shelf_regions,
 )
 from pickup_putdown.layer1.track_b1.videomae_classifier import (
     VideoMAEClassifier,
@@ -736,11 +738,11 @@ def train(
     # Create checkpoint directory
     config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Gate B: Tiny overfit test
+    # Gate B: Tiny overfit test. It runs on a copy: re-creating the model afterwards
+    # would silently discard any warm-started head the caller loaded.
     if not skip_tiny_overfit:
-        # Note: This modifies model weights, so we'll reinitialize after
         test_passed = run_tiny_overfit_test(
-            model=model,
+            model=copy.deepcopy(model),
             dataset=train_loader.dataset,
             device=device,
             config=config,
@@ -751,16 +753,6 @@ def train(
                 "Gate B (tiny overfit test) failed. "
                 "Check data pipeline and model architecture before proceeding."
             )
-
-        # Reinitialize model weights after tiny overfit test
-        logger.info("Reinitializing model for actual training...")
-        model = create_model(
-            model_name=config.model_name,
-            freeze_backbone=config.freeze_backbone,
-            unfreeze_last_n_blocks=config.unfreeze_last_n_blocks,
-            dropout=config.dropout,
-            device=str(device),
-        )
 
     # Setup optimizer. When backbone blocks are unfrozen they need a far smaller step
     # than the head: the backbone is pretrained and the head is not, so a single rate
@@ -951,18 +943,15 @@ def main(
         )
 
     # Load shelf regions
-    with open(shelf_regions_path) as f:
-        shelf_regions_config = yaml.safe_load(f)
-    shelf_regions = {
-        r["region_id"]: r for r in shelf_regions_config.get("regions", [])
-    }
+    shelf_regions = load_shelf_regions(Path(shelf_regions_path))
 
     # Window config
+    window_keys = ("window_duration_s", "window_stride_s", "num_frames", "image_size",
+                   "crop_margin", "crop_scope", "resize_interpolation", "include_shelf_region")
     window_config = WindowConfig(
-        window_duration_s=config_dict.get("window_duration_s", 2.5) if config_path else 2.5,
-        window_stride_s=config_dict.get("window_stride_s", 0.5) if config_path else 0.5,
-        num_frames=config_dict.get("num_frames", 16) if config_path else 16,
+        **{k: config_dict[k] for k in window_keys if config_path and k in config_dict}
     )
+    logger.info("Window config: %s", window_config)
 
     # Build manifests
     logger.info("Building window manifests...")
