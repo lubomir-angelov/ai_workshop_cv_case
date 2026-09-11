@@ -21,12 +21,10 @@ from __future__ import annotations
 
 import argparse
 import csv
-import io
 import os
 import sys
-import time
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -163,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--export-date",
-        default=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        default=datetime.now(UTC).strftime("%Y-%m-%d"),
         help="Export snapshot date; names the local out-dir and the S3 prefix (default: today, UTC)",
     )
     parser.add_argument("--out-dir", default=None, help="Default: .local/cvat_exports/<export-date>")
@@ -224,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
                 "job_status": record["state"],
                 "event_count": event_count,
                 "s3_uri": s3_uri,
-                "export_timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "export_timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
             }
         )
         print(f"  ok     {label}  events={event_count}")

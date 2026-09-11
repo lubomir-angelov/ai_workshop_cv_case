@@ -26,7 +26,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -213,7 +212,7 @@ def build_verified_negative_candidates(
 def build_candidate_table(
     actor_tracks: dict[str, pd.DataFrame],
     clips_df: pd.DataFrame,
-    negative_config: Optional[NegativeSamplingConfig] = None,
+    negative_config: NegativeSamplingConfig | None = None,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """Full candidate table plus the actor tracks that back every candidate in it."""
     annotated = build_candidates_from_tracks(actor_tracks, clips_df)

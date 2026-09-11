@@ -8,17 +8,15 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
 import sys
 from pathlib import Path
 
-import numpy as np
-import os
 import pandas as pd
 import torch
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 import torch.nn as nn
-
 from transformers import VideoMAEModel
 
 from pickup_putdown.layer1.track_b1.inference import (
@@ -134,7 +132,7 @@ def main() -> int:
     s = predictions_df.shape
 
     print(f"\n{'='*60}")
-    print(f"Track B1 Inference (frozen VideoMAE + random head)")
+    print("Track B1 Inference (frozen VideoMAE + random head)")
     print(f"{'='*60}")
     print(f"Candidates processed: {s[0]}")
     print(f"Predictions:          {s[1]}")

@@ -35,10 +35,10 @@ import re
 import shutil
 import subprocess
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator, Optional
 from xml.etree import ElementTree
 
 import pandas as pd
@@ -110,7 +110,7 @@ class ClipAnnotations:
 # ============================================================
 
 
-def _clip_duration_s(clip_id: str) -> Optional[float]:
+def _clip_duration_s(clip_id: str) -> float | None:
     """Recording duration implied by the clip stem, or None if unparseable."""
     match = CLIP_TIME_RE.search(clip_id)
     if match is None:
@@ -124,7 +124,7 @@ def _clip_duration_s(clip_id: str) -> Optional[float]:
     return seconds if seconds > 0 else None
 
 
-def probe_fps(video_path: Path) -> Optional[float]:
+def probe_fps(video_path: Path) -> float | None:
     """Exact average frame rate of a video, or None if it cannot be probed.
 
     CVAT stores annotations as frame indices, so the frame->second conversion is only
@@ -176,7 +176,7 @@ def _split_track(
     run: list[ElementTree.Element] = []
     segment_index = 0
 
-    def flush(run: list[ElementTree.Element], segment_index: int) -> Optional[TrackInterval]:
+    def flush(run: list[ElementTree.Element], segment_index: int) -> TrackInterval | None:
         if not run:
             return None
         frames = [int(box.get("frame", "0")) for box in run]
@@ -215,7 +215,7 @@ def _split_track(
         yield interval
 
 
-def parse_archive(archive: Path, video_dir: Optional[Path] = None) -> ClipAnnotations:
+def parse_archive(archive: Path, video_dir: Path | None = None) -> ClipAnnotations:
     """Parse one ``CVAT for video 1.1`` archive.
 
     When ``video_dir`` holds the matching source video its exact frame rate is used;
@@ -545,7 +545,7 @@ IGNORE_COLUMNS = [
 
 def import_export_dir(
     export_dir: Path,
-    video_dir: Optional[Path] = None,
+    video_dir: Path | None = None,
     min_duration_s: float = 0.25,
     accepted_only: bool = False,
     context_pad_s: float = 3.0,

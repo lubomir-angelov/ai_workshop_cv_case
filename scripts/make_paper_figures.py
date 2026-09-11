@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
@@ -64,7 +65,7 @@ def fig_decode_ablation(output_dir: Path) -> None:
     ax.bar(x - width / 2, f1_30, width, label="tIoU 0.3", color=BLUE)
     ax.bar(x + width / 2, f1_50, width, label="tIoU 0.5", color=ORANGE)
 
-    for xi, (a, b) in enumerate(zip(f1_30, f1_50)):
+    for xi, (a, b) in enumerate(zip(f1_30, f1_50, strict=True)):
         ax.text(xi - width / 2, a + 0.015, f"{a:.2f}", ha="center", fontsize=7.5)
         if not np.isnan(b):
             ax.text(xi + width / 2, b + 0.015, f"{b:.2f}", ha="center", fontsize=7.5)
@@ -84,7 +85,7 @@ def fig_val_test_gap(runs: dict[str, Path], output_dir: Path) -> None:
     """Validation vs test for both models, overall and per class."""
     fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.9), sharey=True)
 
-    for ax, (name, run_dir) in zip(axes, runs.items()):
+    for ax, (name, run_dir) in zip(axes, runs.items(), strict=True):
         val, test = load(run_dir, "val"), load(run_dir, "test")
         metrics = ["$F_1$@0.3", "$F_1$@0.5", "pickup", "putdown"]
         v = [
@@ -99,7 +100,7 @@ def fig_val_test_gap(runs: dict[str, Path], output_dir: Path) -> None:
         width = 0.36
         ax.bar(x - width / 2, v, width, label="validation", color=GREEN)
         ax.bar(x + width / 2, t, width, label="test", color=VERMILLION)
-        for xi, (a, b) in enumerate(zip(v, t)):
+        for xi, (a, b) in enumerate(zip(v, t, strict=True)):
             ax.text(xi - width / 2, a + 0.015, f"{a:.2f}", ha="center", fontsize=7)
             ax.text(xi + width / 2, b + 0.015, f"{b:.2f}", ha="center", fontsize=7)
         ax.set_xticks(x)
@@ -152,7 +153,7 @@ def fig_confusion(runs: dict[str, Path], output_dir: Path) -> None:
     run_dir = runs["Fine-tuned (2 blocks)"]
     fig, axes = plt.subplots(1, 2, figsize=(5.6, 2.6))
 
-    for ax, split in zip(axes, ("val", "test")):
+    for ax, split in zip(axes, ("val", "test"), strict=True):
         confusion = load(run_dir, split)["confusion"]
         types = ["pickup", "putdown"]
         matrix = np.array([[confusion[t].get(c, 0) for c in types] for t in types], dtype=float)

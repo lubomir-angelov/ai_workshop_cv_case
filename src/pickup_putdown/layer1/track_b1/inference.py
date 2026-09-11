@@ -22,7 +22,6 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -31,7 +30,6 @@ from torch.utils.data import DataLoader, Dataset
 
 from pickup_putdown.layer1.track_b1.dataset import (
     LABEL_BACKGROUND,
-    LABEL_NAMES,
     LABEL_PICKUP,
     LABEL_PUTDOWN,
     InferenceWindow,
@@ -199,7 +197,7 @@ class InferenceWindowDataset(Dataset):
         windows: list[InferenceWindow],
         video_path: Path,
         pose_track_df: pd.DataFrame,
-        shelf_region: Optional[dict],
+        shelf_region: dict | None,
         config: InferenceConfig,
     ):
         self.windows = windows
@@ -274,7 +272,7 @@ def predict_windows(
     windows: list[InferenceWindow],
     video_path: Path,
     pose_track_df: pd.DataFrame,
-    shelf_region: Optional[dict],
+    shelf_region: dict | None,
     config: InferenceConfig,
     device: torch.device,
 ) -> list[WindowPrediction]:
@@ -807,7 +805,7 @@ def infer_candidate(
     candidate: pd.Series,
     video_path: Path,
     pose_track_df: pd.DataFrame,
-    shelf_region: Optional[dict],
+    shelf_region: dict | None,
     config: InferenceConfig,
     device: torch.device,
 ) -> list[EventPrediction]:
@@ -1061,7 +1059,7 @@ def main(
     pose_tracks_dir: str,
     shelf_regions_path: str,
     output_path: str,
-    config_path: Optional[str] = None,
+    config_path: str | None = None,
     pickup_threshold: float = 0.5,
     putdown_threshold: float = 0.5,
 ) -> None:

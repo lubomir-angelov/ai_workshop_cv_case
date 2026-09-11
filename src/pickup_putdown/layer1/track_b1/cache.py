@@ -22,9 +22,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
 
 import cv2
 import numpy as np
@@ -121,7 +121,7 @@ def build_candidate_cache(
     output_dir: Path,
     config: WindowConfig,
     overwrite: bool = False,
-) -> Optional[CachedCandidate]:
+) -> CachedCandidate | None:
     """Decode, crop and cache one candidate's frames. Returns None if it cannot be read.
 
     An existing entry is reused only when its fingerprint (video, track boxes, span,
@@ -175,7 +175,7 @@ def build_candidate_cache(
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
         frames = np.zeros((n_frames, image_size[1], image_size[0], 3), dtype=np.uint8)
-        last: Optional[np.ndarray] = None
+        last: np.ndarray | None = None
         decoded = 0
 
         for position in range(n_frames):
@@ -298,7 +298,7 @@ class CachedTrackB1Dataset(Dataset):
         window_manifest: pd.DataFrame,
         cache_dir: Path,
         num_frames: int = 16,
-        transform: Optional[Callable] = None,
+        transform: Callable | None = None,
         config: WindowConfig | None = None,
         require_complete: bool = False,
     ) -> None:

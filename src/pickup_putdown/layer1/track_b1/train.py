@@ -22,7 +22,6 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
@@ -41,9 +40,7 @@ from pickup_putdown.layer1.track_b1.dataset import (
     load_shelf_regions,
 )
 from pickup_putdown.layer1.track_b1.videomae_classifier import (
-    VideoMAEClassifier,
     create_model,
-    load_checkpoint,
     save_checkpoint,
 )
 
@@ -100,7 +97,7 @@ class TrainConfig:
 
     # Learning rate for unfrozen encoder blocks. None means "same as the head", which
     # is only sensible when the backbone is fully frozen.
-    backbone_lr: Optional[float] = None
+    backbone_lr: float | None = None
 
 
 # ============================================================
@@ -118,7 +115,7 @@ class EpochMetrics:
     f1_per_class: dict[str, float]
     precision_macro: float
     recall_macro: float
-    confusion_matrix: Optional[np.ndarray] = None
+    confusion_matrix: np.ndarray | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for logging/saving."""
@@ -157,7 +154,7 @@ def compute_metrics(
 
     # Confusion matrix
     confusion = np.zeros((num_classes, num_classes), dtype=np.int64)
-    for pred, true in zip(predictions, labels):
+    for pred, true in zip(predictions, labels, strict=True):
         confusion[true, pred] += 1
 
     # Per-class metrics
@@ -209,7 +206,7 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     config: TrainConfig,
-    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+    scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
 ) -> dict:
     """Train for one epoch.
 
@@ -314,7 +311,6 @@ def train_one_epoch(
 
     # Compute epoch metrics
     epoch_loss = total_loss / total_samples
-    epoch_accuracy = total_correct / total_samples
     elapsed = time.time() - start_time
 
     all_predictions = torch.cat(all_predictions)
@@ -655,7 +651,7 @@ class EarlyStopping:
         self.min_delta = min_delta
         self.mode = mode
         self.counter = 0
-        self.best_value: Optional[float] = None
+        self.best_value: float | None = None
         self._is_best = False
 
     def __call__(self, metric: float) -> bool:
@@ -703,7 +699,7 @@ def train(
     val_loader: DataLoader,
     config: TrainConfig,
     device: torch.device,
-    class_weights: Optional[torch.Tensor] = None,
+    class_weights: torch.Tensor | None = None,
     skip_tiny_overfit: bool = False,
 ) -> dict:
     """Main training loop.
@@ -791,8 +787,8 @@ def train(
 
     # Training history
     training_history = []
-    best_metrics: Optional[EpochMetrics] = None
-    best_checkpoint_path: Optional[Path] = None
+    best_metrics: EpochMetrics | None = None
+    best_checkpoint_path: Path | None = None
 
     # Training loop
     for epoch in range(config.num_epochs):
@@ -901,8 +897,8 @@ def main(
     pose_tracks_dir: str,
     shelf_regions_path: str,
     output_dir: str,
-    ignore_intervals_path: Optional[str] = None,
-    config_path: Optional[str] = None,
+    ignore_intervals_path: str | None = None,
+    config_path: str | None = None,
     skip_tiny_overfit: bool = False,
 ) -> None:
     """CLI entry point for training.

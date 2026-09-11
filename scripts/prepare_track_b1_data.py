@@ -205,7 +205,7 @@ def main() -> None:
         if not video.is_file():
             fail(f"missing source video: {video}")
         meta = META / clip_id / f"{clip_id}.json"
-        
+
         if not meta.is_file():
             fail(f"missing candidate metadata: {meta}")
         task5 = run_tasks_3_5(clip_id)

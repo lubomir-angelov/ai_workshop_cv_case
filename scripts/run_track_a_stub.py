@@ -21,8 +21,8 @@ from pickup_putdown.layer1.track_a.inference import (
 )
 from pickup_putdown.layer1.track_a.state_machine import StateMachineConfig
 from pickup_putdown.perception.shelf_regions import (
-    load_shelf_config,
     get_expanded_regions,
+    load_shelf_config,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -92,7 +92,7 @@ def main() -> int:
 
     s = result.summary
     print(f"\n{'='*60}")
-    print(f"Track A Inference (stub classifiers)")
+    print("Track A Inference (stub classifiers)")
     print(f"{'='*60}")
     print(f"Candidates total:       {s.candidates_total}")
     print(f"Candidates processed:   {s.candidates_processed}")
@@ -116,7 +116,6 @@ def main() -> int:
             if diag.skipped:
                 print(f"    Skip reason: {diag.skip_reason}")
 
-    output_dir = Path(result.output_paths.get("predictions_csv", OUTPUT_DIR))
     print(f"\nOutput files in {OUTPUT_DIR}:")
     if OUTPUT_DIR.exists():
         for f in sorted(OUTPUT_DIR.iterdir()):

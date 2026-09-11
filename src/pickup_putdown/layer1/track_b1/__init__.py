@@ -16,24 +16,6 @@ from pickup_putdown.layer1.track_b1.dataset import (
     generate_sliding_windows,
     get_label_weights,
 )
-from pickup_putdown.layer1.track_b1.videomae_classifier import (
-    ClassificationHead,
-    VideoMAEClassifier,
-    create_model,
-    load_checkpoint,
-    predict_batch,
-    save_checkpoint,
-)
-from pickup_putdown.layer1.track_b1.train import (
-    EarlyStopping,
-    EpochMetrics,
-    TrainConfig,
-    compute_metrics,
-    run_tiny_overfit_test,
-    train,
-    train_one_epoch,
-    validate,
-)
 from pickup_putdown.layer1.track_b1.inference import (
     EventPrediction,
     InferenceConfig,
@@ -49,6 +31,24 @@ from pickup_putdown.layer1.track_b1.inference import (
     predict_windows,
     save_predictions,
     smooth_predictions,
+)
+from pickup_putdown.layer1.track_b1.train import (
+    EarlyStopping,
+    EpochMetrics,
+    TrainConfig,
+    compute_metrics,
+    run_tiny_overfit_test,
+    train,
+    train_one_epoch,
+    validate,
+)
+from pickup_putdown.layer1.track_b1.videomae_classifier import (
+    ClassificationHead,
+    VideoMAEClassifier,
+    create_model,
+    load_checkpoint,
+    predict_batch,
+    save_checkpoint,
 )
 
 __all__ = [

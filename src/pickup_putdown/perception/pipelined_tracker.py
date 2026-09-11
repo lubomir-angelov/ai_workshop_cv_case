@@ -17,10 +17,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from pickup_putdown.common.schemas import PersonObservation, TrackSummary
-from pickup_putdown.config import AppConfig, TriageConfig
 from pickup_putdown.perception.frame_pipeline import DecoderPool, FrameReorderer
 from pickup_putdown.perception.person_tracker import PersonTracker
 

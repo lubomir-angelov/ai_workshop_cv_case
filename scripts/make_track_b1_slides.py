@@ -250,7 +250,8 @@ def build(output: Path, figures: Path) -> None:
     prs.slide_width, prs.slide_height = W, H
 
     # --- 1. Title ---------------------------------------------------------
-    s = blank(prs); fill(s, PURPLE_DEEP)
+    s = blank(prs)
+    fill(s, PURPLE_DEEP)
     rule(s, Inches(2.35), width=Inches(2.2), color=WHITE)
     _text(box(s, MARGIN, Inches(2.7), Inches(11.2), Inches(2.1)),
           ["Detecting Pickup and Putdown in Retail Video"],
@@ -267,7 +268,8 @@ def build(output: Path, figures: Path) -> None:
              "The negative result is the part worth remembering.")
 
     # --- 2. The question --------------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "Did the item leave the shelf, or return to it?", "The question")
     bullets(s, [
         ("Automated checkout needs the direction of transfer, not merely that an "
@@ -285,7 +287,8 @@ def build(output: Path, figures: Path) -> None:
              "shopper returned. That is the error the system must not make.")
 
     # --- 3. Why it is hard ------------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "The two classes are near time-reverses", "Why this is hard")
     bullets(s, [
         "Same shelf, same hands, same merchandise, near-identical spatial evidence.",
@@ -306,7 +309,8 @@ def build(output: Path, figures: Path) -> None:
              "fragile cue because it is the only one not shared between the classes.")
 
     # --- 4. Data and annotation -------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "Annotation directly on source video", "Data")
     bullets(s, [
         "Single fixed overhead camera, 3840 × 2160 at 20 fps, 2–5 minutes per clip.",
@@ -327,7 +331,8 @@ def build(output: Path, figures: Path) -> None:
              "also creates the conditioning caveat raised in the limitations.")
 
     # --- 5. Pipeline ------------------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "From annotation to evaluated events", "Pipeline")
     stages = [
         ("CVAT\nexport", "42 archives\n261 intervals"),
@@ -355,7 +360,8 @@ def build(output: Path, figures: Path) -> None:
     notes(s, "One command reproduces this: make track-b1-all.")
 
     # --- 6. Actor-conditioned windows -------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "One track is one actor stream", "Method")
     bullets(s, [
         "A window is labelled by what occupies its centre, using only that actor's events.",
@@ -376,7 +382,8 @@ def build(output: Path, figures: Path) -> None:
              "criterion observed rather than argued.")
 
     # --- 7. Crop leakage --------------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "Conditioning available only for positives leaks the label",
                   "Design decision 1")
     bullets(s, [
@@ -393,7 +400,8 @@ def build(output: Path, figures: Path) -> None:
              "conditioning is available only for positives has this hazard.")
 
     # --- 8. Compute -------------------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "Two bottlenecks that decided what was possible", "Engineering")
     table(s, [
         ["", "Naive", "After", "Effect"],
@@ -412,7 +420,8 @@ def build(output: Path, figures: Path) -> None:
     notes(s, "Measured, not estimated: 16 seeking reads 20.6 s against 48 sequential 0.4 s.")
 
     # --- 9. Gates ---------------------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "Two gates before any training run", "Verification")
     for i, (name, body) in enumerate([
         ("Gate A — look at the data",
@@ -434,7 +443,8 @@ def build(output: Path, figures: Path) -> None:
     notes(s, "Both gates caught real problems. Gate A found the crop leakage.")
 
     # --- 10. FINDING 1 ----------------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "A window wider than the event caps tIoU",
                   "Finding 1")
     bullets(s, [
@@ -462,7 +472,8 @@ def build(output: Path, figures: Path) -> None:
                  kicker="Finding 1")
 
     # --- 12. Model + training --------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "Frozen probe, then partial fine-tuning", "Model")
     table(s, [
         ["Validation, window level", "Frozen probe", "Fine-tuned (last 2 blocks)"],
@@ -492,7 +503,8 @@ def build(output: Path, figures: Path) -> None:
                  kicker="Results")
 
     # --- 14. FINDING 2 ----------------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "Direction does not survive a change of recording day", "Finding 2")
     table(s, [
         ["Mean predicted probability on true-putdown windows", "p(putdown)", "p(pickup)"],
@@ -527,7 +539,8 @@ def build(output: Path, figures: Path) -> None:
                  kicker="Finding 2")
 
     # --- 17. Why it matters ----------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "What this means for a checkout system", "Implications")
     bullets(s, [
         ("On an unseen day the system behaves as an interaction detector with a "
@@ -546,7 +559,8 @@ def build(output: Path, figures: Path) -> None:
     notes(s, "This is the take-home message.")
 
     # --- 18. Limitations --------------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "What bounds these claims", "Limitations")
     bullets(s, [
         ("Candidates and crops come from ground-truth annotation boxes, and are used "
@@ -564,7 +578,8 @@ def build(output: Path, figures: Path) -> None:
              "before we mention it will discount everything else.")
 
     # --- 19. Future work --------------------------------------------------
-    s = blank(prs); fill(s, WHITE)
+    s = blank(prs)
+    fill(s, WHITE)
     top = heading(s, "What we would do next", "Future work")
     for i, (num, title_txt, body) in enumerate([
         ("1", "Measure it properly",
@@ -589,7 +604,8 @@ def build(output: Path, figures: Path) -> None:
              "comparison can be trusted.")
 
     # --- 20. Conclusions --------------------------------------------------
-    s = blank(prs); fill(s, PURPLE_DEEP)
+    s = blank(prs)
+    fill(s, PURPLE_DEEP)
     rule(s, Inches(1.0), width=Inches(2.2), color=WHITE)
     _text(box(s, MARGIN, Inches(1.35), Inches(11.2), Inches(0.9)),
           ["Conclusions"], size=36, color=WHITE, bold=True, space_after=0)

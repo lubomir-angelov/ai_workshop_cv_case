@@ -33,7 +33,6 @@ import hashlib
 import logging
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -239,7 +238,7 @@ class VideoMAEClassifier(nn.Module):
         self.unfreeze_last_n_blocks = unfreeze_last_n_blocks
 
         # Load pretrained encoder
-        #The VideoMAe obj 
+        #The VideoMAe obj
         self.encoder = self._load_encoder(model_name)
 
         # Get hidden dimension from encoder config
@@ -546,8 +545,8 @@ def save_checkpoint(
 
 def load_checkpoint(
     checkpoint_path: str | Path,
-    model: Optional[VideoMAEClassifier] = None,
-    optimizer: Optional[torch.optim.Optimizer] = None,
+    model: VideoMAEClassifier | None = None,
+    optimizer: torch.optim.Optimizer | None = None,
     device: str = "auto",
     strict: bool = True,
 ) -> dict:

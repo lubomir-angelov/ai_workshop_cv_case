@@ -20,9 +20,9 @@ import json
 import logging
 import os
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -31,7 +31,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 if TYPE_CHECKING:
-    from typing import Callable
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -137,15 +137,15 @@ class WindowSample:
     clip_id: str
     candidate_id: str
     actor_id: str
-    region_id: Optional[str]
+    region_id: str | None
     window_start_s: float
     window_end_s: float
     label: int
     label_name: str
-    event_id: Optional[str] = None
-    event_confidence: Optional[str] = None
+    event_id: str | None = None
+    event_confidence: str | None = None
     sample_weight: float = 1.0
-    split: Optional[str] = None
+    split: str | None = None
     candidate_start_s: float | None = None
     candidate_end_s: float | None = None
 
@@ -181,7 +181,7 @@ def build_window_manifest(
     ignore_intervals_df: pd.DataFrame,
     clips_df: pd.DataFrame,
     config: WindowConfig,
-    split: Optional[str] = None,
+    split: str | None = None,
 ) -> pd.DataFrame:
     """Generate all training/validation/test windows with labels.
 
@@ -471,7 +471,7 @@ class InferenceWindow:
     clip_id: str
     candidate_id: str
     actor_id: str
-    region_id: Optional[str]
+    region_id: str | None
     window_start_s: float
     window_end_s: float
     window_center_s: float
@@ -615,7 +615,7 @@ def generate_inference_windows_for_candidate(
 def _assign_window_label(
     window_center: float,
     events_df: pd.DataFrame,
-) -> tuple[int, Optional[str], Optional[str]]:
+) -> tuple[int, str | None, str | None]:
     """Determine label based on window center vs event intervals.
 
     Uses center-based assignment: the label is determined by which event
@@ -673,7 +673,7 @@ def _is_in_ignore_interval(
 
 
 def _compute_sample_weight(
-    event_confidence: Optional[str],
+    event_confidence: str | None,
     config: WindowConfig,
 ) -> float:
     """Compute sample weight based on event confidence.
@@ -707,8 +707,8 @@ def decode_window_frames(
     start_s: float,
     end_s: float,
     num_frames: int,
-    frame_transform: Optional[Callable] = None,
-) -> Optional[np.ndarray]:
+    frame_transform: Callable | None = None,
+) -> np.ndarray | None:
     """Seek once, decode forward, and optionally crop each selected frame.
 
     Sampling indices are unchanged. Failed reads raise instead of silently
@@ -800,7 +800,7 @@ def _compute_frame_indices(
 
 def compute_actor_crop_box(
     pose_track_df: pd.DataFrame,
-    shelf_region: Optional[dict],
+    shelf_region: dict | None,
     start_s: float,
     end_s: float,
     margin: float,
@@ -840,7 +840,7 @@ def _union_actor_boxes(
     pose_track_df: pd.DataFrame,
     start_s: float,
     end_s: float,
-) -> Optional[tuple[float, float, float, float]]:
+) -> tuple[float, float, float, float] | None:
     """Merge all actor bounding boxes in time range.
 
     Args:
@@ -1180,9 +1180,9 @@ class TrackB1Dataset(Dataset):
         pose_tracks_dir: Path,
         shelf_regions: dict[str, dict],
         config: WindowConfig,
-        clips_df: Optional[pd.DataFrame] = None,
-        transform: Optional[Callable] = None,
-        cache_dir: Optional[Path] = None,
+        clips_df: pd.DataFrame | None = None,
+        transform: Callable | None = None,
+        cache_dir: Path | None = None,
     ) -> None:
         """Initialize dataset with manifest and paths.
 
@@ -1470,9 +1470,9 @@ def create_dataloaders(
     config: WindowConfig,
     batch_size: int = 8,
     num_workers: int = 4,
-    clips_df: Optional[pd.DataFrame] = None,
+    clips_df: pd.DataFrame | None = None,
     use_weighted_sampling: bool = True,
-    cache_dir: Optional[Path] = None,
+    cache_dir: Path | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """Factory for train/val dataloaders.
 
@@ -1526,9 +1526,9 @@ def create_dataloaders(
 
     worker_options = {}
     if num_workers > 0:
-        worker_options = dict(
-            persistent_workers=True, prefetch_factor=1,
-            worker_init_fn=_init_data_worker, multiprocessing_context="spawn")
+        worker_options = {
+            "persistent_workers": True, "prefetch_factor": 1,
+            "worker_init_fn": _init_data_worker, "multiprocessing_context": "spawn"}
 
     train_loader = DataLoader(
         train_dataset,
