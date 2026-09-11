@@ -9,9 +9,15 @@
         --checkpoint .local/track_b1_output_human/checkpoints/best_model.pt \
         --evidence-dataset-dir .local/track_b1_dataset_deploy --output-dir .local/diag_baseline
 
-Writes per-window predictions (val_predictions.csv), the confusion matrix (rows =
-true, columns = predicted), per-class metrics, and a review manifest with preview
-videos of the actual model input. When CVAT boxes are available each event window
+Writes, per evaluated split, per-window predictions (``<split>_predictions.csv``), the
+confusion matrix (``<split>_confusion_matrix.csv``, rows = true, columns = predicted),
+per-class metrics (``<split>_metrics.json``) and a review manifest with preview videos of
+the actual model input (``<split>_review_manifest.csv``, ``<split>_review_clips/``); it
+refuses to overwrite an earlier run of the same split. Runs before 2026-09-11 wrote
+split-less names (``val_predictions.csv`` whatever the split); those files are left as is.
+The checkpoint's stored validation macro F1 is compared only when this run re-evaluates
+the same data it was selected on (validation split, same dataset directory / input mode;
+legacy layout: validation split). When CVAT boxes are available each event window
 also gets evidence columns that separate a transfer cropped out of view
 (``event_box_in_crop``) from one that fell between sampled frames
 (``sampled_frames_in_event``), and ``crop_is_full_frame`` flags a missing actor box.
@@ -193,13 +199,23 @@ def legacy_dataset(args):
 
 
 def load_model(checkpoint_path: Path, model_name: str):
-    """Full-model or head-only checkpoint, loaded strictly; returns (model, record)."""
+    """Full-model or head-only checkpoint, loaded strictly; returns (model, record).
+
+    The record's ``dataset_dir`` / ``input_mode`` say which validation data the stored
+    ``f1_macro`` was measured on: head checkpoints store them, the pixel-path trainer
+    writes them to ``run_config.json`` beside its ``checkpoints/`` directory.
+    """
     saved = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if "head_state_dict" in saved:
         model = VideoMAEClassifier(model_name=model_name, num_classes=3, freeze_backbone=True)
         model.head = ClassificationHead(saved["hidden_dim"], 3, dropout=saved.get("dropout", 0.1))
         model.head.load_state_dict(saved["head_state_dict"], strict=True)
-        return model, {"epoch": saved.get("epoch"), "f1_macro": saved.get("val_f1_macro")}
+        return model, {
+            "epoch": saved.get("epoch"),
+            "f1_macro": saved.get("val_f1_macro"),
+            "dataset_dir": saved.get("dataset_dir"),
+            "input_mode": saved.get("input_mode"),
+        }
     mc = saved["model_config"]
     model = VideoMAEClassifier(
         model_name=mc["model_name"],
@@ -208,10 +224,35 @@ def load_model(checkpoint_path: Path, model_name: str):
         unfreeze_last_n_blocks=mc["unfreeze_last_n_blocks"],
     )
     model.load_state_dict(saved["model_state_dict"], strict=True)
+    run_config_path = checkpoint_path.parent.parent / "run_config.json"
+    run_config = json.loads(run_config_path.read_text()) if run_config_path.is_file() else {}
     return model, {
         "epoch": saved.get("epoch"),
         "f1_macro": saved.get("metrics", {}).get("f1_macro"),
+        "dataset_dir": run_config.get("dataset_dir"),
+        "input_mode": run_config.get("input_mode"),
     }
+
+
+def comparison_blocker(split, expected, dataset_path, input_mode, legacy):
+    """Why the stored checkpoint metric is not comparable with this run, or None if it is.
+
+    Both trainers store window macro F1 over their validation manifest, so a comparison
+    is meaningful only for the validation split of that same dataset.
+    """
+    if expected.get("f1_macro") is None:
+        return "checkpoint stores no validation macro F1"
+    if split != "val":
+        return f"stored metric is validation macro F1; this run evaluates split {split!r}"
+    if legacy:
+        return None
+    if expected.get("dataset_dir") is None:
+        return "checkpoint records no training dataset directory"
+    if Path(expected["dataset_dir"]).resolve() != Path(dataset_path).resolve():
+        return f"checkpoint was validated on {expected['dataset_dir']}, not {dataset_path}"
+    if expected.get("input_mode") not in (None, input_mode):
+        return f"checkpoint input mode {expected['input_mode']} != {input_mode}"
+    return None
 
 
 def cvat_event_lookup(evidence_dir, legacy_events=None):
@@ -303,7 +344,7 @@ def main():
     parser.add_argument(
         "--model-name", default="MCG-NJU/videomae-base", help="encoder for head-only checkpoints"
     )
-    parser.add_argument("--split", default="val")
+    parser.add_argument("--split", default="val", choices=["train", "val", "test"])
     parser.add_argument("--video-dir", type=Path, default=Path(".local/source_videos"))
     parser.add_argument("--cache-dir", type=Path, default=Path(".local/track_b1_cache"))
     parser.add_argument(
@@ -332,6 +373,9 @@ def main():
         parser.error("workers/review-count must be nonnegative and batch-size positive")
     if args.review_count and shutil.which("ffmpeg") is None:
         parser.error("ffmpeg is required for previews; use --review-count 0 for metrics only")
+    out, prefix = args.output_dir, f"{args.split}_"
+    if (out / f"{prefix}predictions.csv").exists():
+        parser.error(f"{out / f'{prefix}predictions.csv'} exists; choose a new --output-dir")
 
     legacy_events = None
     if args.legacy_data_dir:
@@ -406,26 +450,36 @@ def main():
         zero_division=0,
     )
     report["input_mode"] = input_mode
+    report["split"] = args.split
+    report["dataset_dir"] = str(args.legacy_data_dir or args.dataset_dir)
     report["checkpoint"] = str(args.checkpoint)
     report["checkpoint_epoch"] = expected.get("epoch")
     report["window_count"] = len(result)
     report["accuracy"] = float((result.true_id == result.pred_id).mean())
     report["always_background_accuracy"] = float((result.true_id == 0).mean())
+    blocker = comparison_blocker(
+        args.split, expected, report["dataset_dir"], input_mode, bool(args.legacy_data_dir)
+    )
+    report["checkpoint_comparison"] = {
+        "compared": blocker is None,
+        "reason_not_compared": blocker,
+        "stored_val_f1_macro": None
+        if expected.get("f1_macro") is None
+        else float(expected["f1_macro"]),
+        "stored_dataset_dir": expected.get("dataset_dir"),
+    }
     report["macro_f1_difference_from_checkpoint"] = (
-        float(report["macro avg"]["f1-score"] - expected["f1_macro"])
-        if expected.get("f1_macro") is not None
-        else None
+        float(report["macro avg"]["f1-score"] - expected["f1_macro"]) if blocker is None else None
     )
     matrix = confusion_matrix(result.true_id, result.pred_id, labels=[0, 1, 2])
-    out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
-    result.to_csv(out / "val_predictions.csv", index=False)
+    result.to_csv(out / f"{prefix}predictions.csv", index=False)
     pd.DataFrame(
         matrix, index=pd.Index(NAMES, name="true_label"), columns=[f"pred_{x}" for x in NAMES]
-    ).to_csv(out / "confusion_matrix.csv")
-    (out / "metrics.json").write_text(json.dumps(report, indent=2) + "\n")
+    ).to_csv(out / f"{prefix}confusion_matrix.csv")
+    (out / f"{prefix}metrics.json").write_text(json.dumps(report, indent=2) + "\n")
     selected = select_review(result, args.review_count)
-    review_dir = out / "review_clips"
+    review_dir = out / f"{prefix}review_clips"
     review_dir.mkdir(exist_ok=True)
     selected["preview_path"] = ""
     selected["review_status"] = "pending"
@@ -437,19 +491,24 @@ def main():
         item = dataset[int(row.dataset_index)]
         write_preview(item["pixel_values"], path, row.window_end_s - row.window_start_s)
         selected.loc[idx, "preview_path"] = str(path)
-    selected.to_csv(out / "review_manifest.csv", index=False)
+    selected.to_csv(out / f"{prefix}review_manifest.csv", index=False)
     LOG.info(
-        "Done [%s]: %s | accuracy=%.4f macro F1=%.4f | review clips=%d",
+        "Done [%s, split %s]: %s | accuracy=%.4f macro F1=%.4f | review clips=%d",
         input_mode,
+        args.split,
         out,
         report["accuracy"],
         report["macro avg"]["f1-score"],
         len(selected),
     )
     delta = report["macro_f1_difference_from_checkpoint"]
-    if delta is not None and abs(delta) > 1e-4:
+    if blocker is not None:
+        LOG.info("Stored checkpoint F1 not compared: %s", blocker)
+    elif abs(delta) > 1e-4:
         LOG.warning(
-            "Metrics differ from checkpoint by %.6f F1; check matching YAML/data/split", delta
+            "Validation macro F1 differs from the checkpoint's stored value by %.6f; "
+            "check matching YAML/data",
+            delta,
         )
 
 

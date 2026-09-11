@@ -1,0 +1,56 @@
+{
+  "dataset_dir": ".local/track_b1_repro_cvat_20260911/dataset",
+  "video_dir": "/home/ubuntu/repos/ai_workshop_cv_case/.local/source_videos",
+  "cache_dir": "/home/ubuntu/repos/ai_workshop_cv_case/.local/track_b1_cache",
+  "frame_cache_dir": "/home/ubuntu/repos/ai_workshop_cv_case/.local/track_b1_frame_cache",
+  "output_dir": ".local/track_b1_repro_cvat_20260911/finetune_last2",
+  "model_name": "MCG-NJU/videomae-base",
+  "epochs": "20",
+  "batch_size": "8",
+  "learning_rate": "0.001",
+  "weight_decay": "0.01",
+  "patience": "5",
+  "dropout": "0.1",
+  "unfreeze_last_n_blocks": "2",
+  "backbone_lr": "5e-05",
+  "init_head_from": ".local/track_b1_repro_cvat_20260911/frozen_head/checkpoints/head_best.pt",
+  "num_workers": "4",
+  "device": "cuda",
+  "seed": "42",
+  "skip_tiny_overfit": "False",
+  "balanced_sampler": "False",
+  "class_weights": [
+    0.17122162878513336,
+    1.1951040029525757,
+    1.6336743831634521
+  ],
+  "input_mode": "annotation",
+  "preprocessing": {
+    "version": 2,
+    "num_frames": 16,
+    "image_size": [
+      224,
+      224
+    ],
+    "crop_margin": 0.15,
+    "crop_scope": "candidate",
+    "resize_interpolation": "area",
+    "include_shelf_region": false,
+    "frame_sampling": "linspace(int(start*fps), int(end*fps)-1, num_frames)",
+    "normalization": "bgr->rgb, imagenet mean/std"
+  },
+  "split_registry": {
+    "file": "/home/ubuntu/repos/ai_workshop_cv_case/configs/track_b1_splits.yaml",
+    "name": "cvat_b1_2026_09_09",
+    "days": {
+      "20260520": "train",
+      "20260521": "train",
+      "20260522": "train",
+      "20260523": "val",
+      "20260526": "test"
+    }
+  },
+  "encoder_weights_sha256": "bc053ca2840a038b1068269a4eec06ca569689e9a1ed9376a5b2b8a111be5290",
+  "n_train_windows": 5192,
+  "n_val_windows": 973
+}

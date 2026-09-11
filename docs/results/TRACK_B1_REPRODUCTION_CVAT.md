@@ -10,13 +10,26 @@ performance. **20260526 (test) is not an untouched test set**: it was the
 
 | model | verdict | why |
 |---|---|---|
-| frozen head | **reproduced** | val window macro F1 0.6147 vs 0.615 (per class identical to 3 decimals); val event F1 exactly 0.585 / 0.523 (tuned) and 0.647 / 0.412 (default) when GT is counted as the CVAT branch did; test identical (0.361 / 0.278 / 0.316 / 0.133) |
-| fine-tuned (last 2 blocks) | **approximately matched at window level, event/test inconclusive** | val window macro F1 0.7348 vs 0.743 (−0.008), but the best epoch is 8 not 4 and test event F1 differs (0.529 / 0.471 vs 0.457 / 0.314). A cold-head rerun rules out the warm start as the cause; run-to-run spread is as large as the gap |
+| frozen head | **reproduced exactly** (annotation-conditioned) | val window macro F1 0.6147 vs 0.615 (per class identical to 3 decimals); val event F1 exactly 0.585 / 0.523 (tuned) and 0.647 / 0.412 (default) under per-event-group counting, as the CVAT branch counted; test identical (0.361 / 0.278 / 0.316 / 0.133) |
+| fine-tuned (last 2 blocks), warm and cold head | **historical window performance approximately matched; historical fine-tuning experiment not reproduced** | val window macro F1 0.7348 (warm) and 0.7220 (cold) vs 0.743, but best epochs (8, 5 vs 4), epoch-1 behaviour, validation event F1 pairs and every test row differ from the historical run (see the cold-head diagnostic) |
+
+Conclusions, bounded by one run per initialisation setting:
+
+* The annotation-conditioned frozen-head results reproduce exactly.
+* Warm-head and cold-head fine-tuning both approximately match historical validation window
+  performance, and neither reproduces the historical fine-tuning experiment.
+* The cold-head run does not support loss of the warm start as a sufficient explanation of
+  the discrepancy: removing the warm start moves validation further from history, not closer.
+* There is one run per initialisation. The warm/cold difference is not an estimate of
+  seed-to-seed variance and cannot isolate the cause of the discrepancy.
+* The cross-day putdown weakness persists in both runs.
+* Matching one historical metric in isolation (e.g. the cold run's 0.746) does not
+  reproduce an experiment.
 
 ## Provenance
 
-* Commit `65a3f07` (`feature/unify_track_b_trainings_and_eval`) plus the uncommitted
-  artifact-only changes below. Python 3.13.5, torch 2.14.0 (CUDA 13.0, cuDNN 9.24),
+* Commit `65a3f07` (`feature/unify_track_b_trainings_and_eval`) plus the artifact-only
+  changes below (committed as `f98cff3`); the cold-head run used `4956f77`. Python 3.13.5, torch 2.14.0 (CUDA 13.0, cuDNN 9.24),
   transformers 5.16.1, numpy 2.5.3, pandas 3.0.5, opencv 5.0.0.93, ffprobe 4.4.2;
   RTX 5090 32 GB, WSL2. Full list: `provenance/{git_env,packages}.txt`, `pip_freeze.txt`.
 * Encoder `MCG-NJU/videomae-base`, loaded strictly through `convert_encoder_state`
@@ -59,6 +72,10 @@ confidence weights 0.5-1.0.
 * Decode: `window_centers`, merge gap 0.75 s, min duration 0.3 s; thresholds per table
   below; tIoU 0.3 / 0.5 with the shared Task 8 evaluator. Per-type scores are at tIoU 0.5.
 * Frozen selection before test: `$E/frozen_selection.json` (checkpoint sha256s, decode).
+* Versioned copies of the small provenance files (commands, effective run configs,
+  selections, chosen thresholds, checkpoint sha256s, environment) are in
+  `docs/results/provenance/track_b1_repro_cvat_20260911/`; `commands.sh` there lists every
+  command. Checkpoints, caches, datasets and predictions stay under `.local/`.
 
 ## Fine-tune preflight (`$E/provenance/preflight_finetune.json`)
 
@@ -90,10 +107,16 @@ the model overfits (train F1 0.998 by epoch 13).
 
 ### Event level, validation (F1 @ tIoU 0.3 / 0.5)
 
-Canonical GT expands `item_count = N` into N rows (34 val rows). "Collapsed" re-scores the
-same predictions against one row per `event_group_id` (32 rows), as the CVAT branch counted.
+Two counting policies (`inference.COUNTING_POLICIES`, `scripts/rescore_track_b1_events.py`),
+applied to the same predictions. **Per-item** (primary) follows the annotation convention of
+one row per item: `item_count = N` is N rows (34 val rows). **Per-event-group** (historical
+comparison) collapses those rows to one per (clip, `event_group_id`) (32 rows), as the CVAT
+branch counted. Predictions are never duplicated: the classifier outputs no item count, so
+one detection of a 3-item event scores 1 TP + 2 FN per item and 1 TP per group.
+`infer_track_b1.py` now records both; the promoted implementation reproduces the scratch
+helper's numbers on all nine prediction sets of this experiment (`$E/logs/24_*`).
 
-| model | decode (pickup / putdown thr, smoothing) | expanded GT | collapsed GT | historical |
+| model | decode (pickup / putdown thr, smoothing) | per-item | per-event-group | historical |
 |---|---|---|---|---|
 | frozen | 0.50 / 0.50, 3 (historical code default) | 0.629 / 0.400 | **0.647 / 0.412** | 0.647 / 0.412 |
 | frozen | 0.40 / 0.45, 5 (configured) | 0.571 / 0.286 | 0.587 / 0.293 | — |
@@ -102,7 +125,7 @@ same predictions against one row per `event_group_id` (32 rows), as the CVAT bra
 | fine-tuned | 0.40 / 0.45, 5 (configured) | 0.716 / 0.627 | 0.738 / 0.646 | |
 | fine-tuned | **0.50 / 0.20, 3 (val-tuned, selected)** | 0.771 / 0.743 | 0.794 / 0.765 | |
 
-Selected-decode per-type F1 @0.5 (expanded): frozen pickup 0.558 / putdown 0.417; fine-tuned
+Selected-decode per-type F1 @0.5 (per-item): frozen pickup 0.558 / putdown 0.417; fine-tuned
 pickup 0.826 / putdown 0.583. Fine-tuned boundary MAE 0.22 s / 0.25 s; frozen 0.50 / 0.48 s
 at the default decode (historical 0.48 s). Neither historical fine-tuned pair is reproduced as a
 pair by any decode here; which one is authoritative remains unresolved. The fine-tuned
@@ -117,7 +140,7 @@ sweep's best putdown threshold (0.20, tied with 0.25) is the lowest grid value.
 | fine-tuned | 0.890 | 0.539 (0.945 / 0.576 / 0.095) | 0.529 | 0.471 | 0.500 | 0.375 |
 | historical fine-tuned | | | 0.457 | 0.314 | 0.393 | 0.000 |
 
-Test has no multi-item groups (35 rows = 35 intervals), so expanded and collapsed agree.
+Test has no multi-item groups (35 rows = 35 groups), so the two counting policies agree.
 The cross-day putdown collapse reproduces: on true-putdown test windows the fine-tuned model's
 mean p_putdown is 0.062 (historical 0.062; val 0.393), putdown window recall is 0.05 for both
 models, and fine-tuned predictions are 29 pickup / 4 putdown against a GT of 23 / 12.
@@ -135,22 +158,25 @@ unless `--skip-tiny-overfit`) explains the fine-tune gap. Same command and setti
 | best epoch / stop | 8 / 13 | 5 / 10 | 4 / — |
 | val window macro F1 (bg / pickup / putdown) | 0.7348 (0.962 / 0.711 / 0.532) | 0.7220 (0.951 / 0.684 / 0.531) | 0.743 (— / 0.736 / 0.539) |
 | val-tuned decode | 0.50 / 0.20, 3 | 0.40 / 0.35, 5 | 0.40 / 0.45, 5 (config) |
-| val event F1 @0.3 / @0.5, expanded (collapsed) | 0.771 / 0.743 (0.794 / 0.765) | 0.754 / 0.725 (0.776 / 0.746) | 0.806 / 0.746 or 0.783 / 0.638 |
+| val event F1 @0.3 / @0.5, per-item (per-event-group) | 0.771 / 0.743 (0.794 / 0.765) | 0.754 / 0.725 (0.776 / 0.746) | 0.806 / 0.746 or 0.783 / 0.638 |
 | test event F1 @0.3 / @0.5 | 0.529 / 0.471 | 0.580 / 0.435 | 0.457 / 0.314 |
 | test pickup / putdown F1 @0.5 | 0.500 / 0.375 | 0.480 / 0.316 | 0.393 / 0.000 |
 | test window macro F1 | 0.539 | 0.583 | — |
 | test mean p_putdown on true putdowns | 0.062 | 0.181 | 0.062 |
 
-**The warm start does not explain the gap.** The cold head is further from the historical
-validation result, not closer, and neither initialisation reproduces the historical test
-row (putdown 0.000). The two runs differ from each other about as much as either differs
-from history (test F1@0.5 0.471 vs 0.435, putdown window F1 0.095 vs 0.225), so
-single-run variance of the fine-tune (batch order, platform numerics) is large relative to
-the gap and a single historical run cannot be matched more closely. Resolving it would
-take several seeds per condition. Both runs keep the cross-day direction failure: putdown
-test recall at window level is 0.05 (warm) and 0.18 (cold) against 0.40-0.48 on validation.
-The cold run's collapsed-GT val F1@0.5 equals one historical value (0.746); the paired
-F1@0.3 does not (0.776 vs 0.806), so this is not read as a match.
+**The cold-head run does not support loss of the warm start as a sufficient explanation.**
+Without the warm start, validation window macro F1 moves further from the historical value
+(0.7220 vs 0.7348 warm, 0.743 historical), and neither initialisation reproduces the
+historical epoch-1 profile, best epoch, validation event pair or test row (putdown 0.000).
+Warm and cold also differ from each other (test F1@0.5 0.471 vs 0.435, putdown window F1
+0.095 vs 0.225), but with one run per setting that difference confounds initialisation
+with run-to-run variation (batch order, platform numerics); it is not an estimate of
+seed-to-seed variance and cannot isolate what caused the historical discrepancy. That
+would take several seeds per condition (not run here). Both runs keep the cross-day putdown
+weakness: putdown test recall at window level is 0.05 (warm) and 0.18 (cold) against
+0.40-0.48 on validation. The cold run's per-event-group val F1@0.5 equals one historical
+value (0.746) while the paired F1@0.3 does not (0.776 vs 0.806); one matching number is
+not a reproduction of the experiment.
 
 ## Differences caused by the integrated code
 
@@ -161,15 +187,17 @@ F1@0.3 does not (0.776 vs 0.806), so this is not read as a match.
   (verified). On the CVAT code, Gate B re-created the model, so its fine-tune had a warm
   head only if it ran with `--skip-tiny-overfit`, which is not recorded. Its epoch 1
   (putdown F1 0.057) looks more like a re-initialised head than this run's warm-started epoch 1
-  (0.484); circumstantial only. The most likely source of the differing fine-tune
-  trajectory, together with MPS vs CUDA numerics and batch order.
+  (0.484); circumstantial only. The cold-head run (above) does not support this as a
+  sufficient explanation; MPS vs CUDA numerics, batch order and other unrecorded
+  differences remain candidates, none isolated.
 * **Encoder loading**: strict layout conversion on transformers 5.16.1 instead of
   transformers <5; the frozen-head reproduction to the last decimal indicates equivalent
   features.
 * Shared by both branches, kept as is: in the pixel trainer, per-sample confidence weights
-  replace the class-weighted loss (class weights only enter the validation loss); the
-  embedding head uses class weights × sample weights. The two stages therefore train with
-  different loss weighting.
+  replace the class-weighted loss (class weights only enter the validation loss, and the
+  balanced sampler is off); the embedding head uses class weights × sample weights. The two
+  stages therefore train with different loss weighting. Exact loss computations, their
+  history and a separately named follow-up experiment: `docs/TRACK_B1_INTEGRATION.md` §10.
 
 ## Runtime and resources
 
@@ -199,8 +227,13 @@ python scripts/tune_track_b1_thresholds.py --dataset-dir $E/dataset --prediction
 python scripts/infer_track_b1.py ... --split val  --pickup-threshold P --putdown-threshold D --smoothing-window S --output-dir $E/$M/eval/val_tuned_decode
 python scripts/infer_track_b1.py ... --split test --pickup-threshold P --putdown-threshold D --smoothing-window S --output-dir $E/$M/eval/test_frozen_decode
 python scripts/diagnose_track_b1.py --dataset-dir $E/dataset --checkpoint $E/$M/$C --split {val,test} --output-dir $E/$M/diagnostics_{val,test} --workers 4
-python $E/provenance/collapsed_gt_eval.py $E/dataset $E/$M/eval/<run> {val,test}
+python scripts/rescore_track_b1_events.py --dataset-dir $E/dataset --predictions-dir $E/$M/eval/<run> --split {val,test}
 ```
+
+Exact per-run commands with every flag: `docs/results/provenance/track_b1_repro_cvat_20260911/commands.sh`.
+`$E/provenance/collapsed_gt_eval.py` was the scratch helper the rescoring script replaces;
+its `collapsed_gt_comparison_<split>.json` outputs are kept next to the new
+`rescored_by_counting_policy_<split>.json`.
 
 ## Paths (under `$E`)
 
@@ -213,9 +246,14 @@ python $E/provenance/collapsed_gt_eval.py $E/dataset $E/$M/eval/<run> {val,test}
 | threshold sweep | `frozen_head/eval/val_sweep/` | `finetune_last2/eval/val_sweep/` |
 
 Logs, PIDs and commands: `$E/logs/`; provenance, preflight and helper scripts:
-`$E/provenance/`. `diagnose_track_b1.py` names its per-window file `val_predictions.csv`
-and warns that metrics "differ from checkpoint" for any split other than val; the
-`diagnostics_test/` contents are test windows (1551).
+`$E/provenance/`. The `diagnostics_{val,test}/` directories predate the split-aware fix and
+are kept unchanged: there `diagnose_track_b1.py` named its per-window file
+`val_predictions.csv` for every split and warned that metrics "differ from checkpoint" for
+test, so `diagnostics_test/val_predictions.csv` holds the 1551 **test** windows and that
+warning is spurious. Since the fix, files are named per split (`test_predictions.csv`,
+`test_metrics.json`, …), an existing file is never overwritten, and the stored validation F1
+is compared only when the run re-evaluates the checkpoint's own validation data
+(`frozen_head/diagnostics_splitaware/`: val difference −1e−16, test "not compared").
 
 ## Code changes made for this run
 
@@ -223,12 +261,21 @@ Artifact-only, no effect on training or scores: `train_track_b1_head.py` also sa
 `head_final.pt` and records `final_epoch`; `track_b1/train.py` saves `final_model.pt` and
 logs every optimizer group's learning rate per epoch.
 
+Reproduction cleanup (no effect on training, window scores or per-item event metrics):
+counting policies in `track_b1/inference.py` (`ground_truth_for_policy`,
+`evaluate_events_by_policy`), recorded by `infer_track_b1.py` and re-scorable with
+`scripts/rescore_track_b1_events.py`; split-aware `diagnose_track_b1.py`; the chosen
+thresholds record their counting policy; tests `tests/test_track_b1_counting_policy.py`,
+`tests/test_diagnose_track_b1.py`.
+
 ## Open issues
 
-* Fine-tune reproduction: the warm-start hypothesis was tested and rejected (see the
-  diagnostic above). The remaining gap is within the observed run-to-run spread; a
-  multi-seed comparison would be needed to say more.
+* Fine-tune reproduction: loss of the warm start was tested and is not supported as a
+  sufficient explanation (see the diagnostic above). With one run per initialisation the
+  cause of the discrepancy is not isolated; a multi-seed comparison per condition would be
+  needed (not run).
 * The fine-tuned decode choice sits at the grid edge (putdown 0.20); the historical grid
   was kept.
 * The class-weight inconsistency between the two trainers is untouched, to preserve
-  reproduction.
+  reproduction (`docs/TRACK_B1_INTEGRATION.md` §10; follow-up experiment
+  `track_b1_consistent_loss_weighting`, not run).

@@ -10,7 +10,8 @@ over a grid of pickup/putdown thresholds. The model is never re-run, so a full s
 costs seconds.
 
 Selection is on the mean of validation event-level F1 at tIoU 0.3 and 0.5 from the
-shared Task 8 evaluator (the rule the configured thresholds were chosen by).
+shared Task 8 evaluator (the rule the configured thresholds were chosen by), counted
+per item (the primary policy; never tuned per counting policy).
 The chosen thresholds are written out to be recorded in configuration and applied to
 test exactly once; nothing here reads the test split.
 """
@@ -155,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         "smoothing_window": int(best["smoothing_window"]),
         "same_type_merge_gap_s": args.same_type_merge_gap_s,
         "min_event_duration_s": args.min_event_duration_s,
+        "counting_policy": "per_item",
         "val_objective": float(best["objective"]),
         **{k: float(best[k]) for k in best.index if "@" in k},
         "selected_on": "validation split only; test not read",

@@ -15,6 +15,8 @@ of one actor from overlapping candidates are suppressed.
 Evaluation uses the shared Task 8 evaluator against every reviewed event of the
 split's clips, including events no candidate covers and clips with no events, so
 proposal misses count as false negatives. Candidate coverage is reported separately.
+Per-item counting is primary; per-event-group scores are recorded alongside for
+historical comparison (``inference.COUNTING_POLICIES``).
 Annotation-mode results are annotation-conditioned and are labelled as such.
 """
 
@@ -42,9 +44,11 @@ from pickup_putdown.layer1.track_b1.dataset_dir import (  # noqa: E402
     open_window_dataset,
 )
 from pickup_putdown.layer1.track_b1.inference import (  # noqa: E402
+    PRIMARY_COUNTING_POLICY,
     InferenceConfig,
     decode_window_scores,
-    evaluate_events,
+    evaluate_events_by_policy,
+    ground_truth_counts,
     suppress_duplicate_events,
 )
 from pickup_putdown.layer1.track_b1.videomae_classifier import (  # noqa: E402
@@ -230,13 +234,14 @@ def main(argv: list[str] | None = None) -> int:
         for c, d in zip(clips["clip_id"], clips["duration_s"], strict=True)
         if c in split_clips
     }
-    metrics = evaluate_events(
+    by_policy = evaluate_events_by_policy(
         predictions,
         ground_truth,
         ignores[ignores["clip_id"].isin(split_clips)],
         durations,
         tuple(args.tiou),
     )
+    metrics = by_policy[PRIMARY_COUNTING_POLICY]
 
     coverage = dataset_dir.table("candidate_coverage")
     coverage = coverage[coverage["clip_id"].isin(split_clips)]
@@ -247,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         "n_clips": len(split_clips),
         "n_clips_without_events": len(split_clips - set(ground_truth["clip_id"])),
         "n_ground_truth_event_rows": int(len(ground_truth)),
+        "ground_truth_counts": ground_truth_counts(ground_truth),
         "n_candidates": int(len(candidates)),
         "n_windows": int(len(scores)),
         "n_predictions": int(len(predictions)),
@@ -258,7 +264,9 @@ def main(argv: list[str] | None = None) -> int:
         "split_registry": dataset_dir.metadata["split_registry"]["name"],
         "preprocessing": dataset_dir.metadata["preprocessing"],
         "decode": {k: v for k, v in asdict(config).items() if k in DECODE_KEYS},
+        "counting_policy": PRIMARY_COUNTING_POLICY,
         "event_metrics": metrics,
+        "event_metrics_by_counting_policy": by_policy,
     }
     (out / f"metrics_{args.split}.json").write_text(json.dumps(record, indent=2, default=str))
 
@@ -283,6 +291,11 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"  {event_type:8s}: P={row['precision']:.3f} R={row['recall']:.3f} F1={row['f1']:.3f}"
         )
+    grouped = by_policy["per_event_group"]
+    print(
+        f"  per-event-group (historical comparison, {grouped['n_ground_truth_rows']} GT rows): "
+        + " ".join(f"F1@{t}={grouped[f'tiou@{t}']['f1']:.3f}" for t in args.tiou)
+    )
     print(f"-> {out}")
     return 0
 

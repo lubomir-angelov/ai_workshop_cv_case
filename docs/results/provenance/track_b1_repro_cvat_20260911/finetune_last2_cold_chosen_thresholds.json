@@ -1,0 +1,23 @@
+{
+  "input_mode": "annotation",
+  "tiou": [
+    0.3,
+    0.5
+  ],
+  "boundary_mode": "window_centers",
+  "window_duration_s": 1.5,
+  "window_stride_s": 0.25,
+  "pickup_threshold": 0.4,
+  "putdown_threshold": 0.35,
+  "smoothing_window": 5,
+  "same_type_merge_gap_s": 0.75,
+  "min_event_duration_s": 0.3,
+  "val_objective": 0.7391304347826086,
+  "f1@0.3": 0.7536231884057971,
+  "precision@0.3": 0.7428571428571429,
+  "recall@0.3": 0.7647058823529411,
+  "f1@0.5": 0.7246376811594202,
+  "precision@0.5": 0.7142857142857143,
+  "recall@0.5": 0.7352941176470589,
+  "selected_on": "validation split only; test not read"
+}

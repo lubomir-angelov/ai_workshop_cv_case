@@ -1,0 +1,20 @@
+[test] clips=12 (with events 9) event_rows=35 {'pickup': 23, 'putdown': 12} | unique intervals=35 {'pickup': 23, 'putdown': 12} | expanded extra rows=0 | review_status={'accepted': 27, 'draft': 8} (groups {'accepted': 27, 'draft': 8})
+[train] clips=23 (with events 20) event_rows=214 {'pickup': 136, 'putdown': 78} | unique intervals=192 {'pickup': 127, 'putdown': 65} | expanded extra rows=22 | review_status={'accepted': 211, 'draft': 3} (groups {'accepted': 189, 'draft': 3})
+[val] clips=7 (with events 6) event_rows=34 {'pickup': 20, 'putdown': 14} | unique intervals=32 {'pickup': 20, 'putdown': 12} | expanded extra rows=2 | review_status={'accepted': 32, 'draft': 2} (groups {'accepted': 30, 'draft': 2})
+total rows 283 groups 259 item_count over groups: {1: 241, 2: 14, 3: 3, 5: 1}
+unique (clip,actor,t_start,t_end,type): 259
+candidates by split: {'test': 71, 'train': 227, 'val': 44}
+windows by split x label:
+ label_name  background  pickup  putdown   All
+split                                        
+test              1320     174       57  1551
+train             4160     596      436  5192
+val                814      96       63   973
+All               6294     866      556  7716
+sample_weight by split/label: {('test', 'background'): {'min': 1.0, 'max': 1.0, 'mean': 1.0}, ('test', 'pickup'): {'min': 1.0, 'max': 1.0, 'mean': 1.0}, ('test', 'putdown'): {'min': 1.0, 'max': 1.0, 'mean': 1.0}, ('train', 'background'): {'min': 1.0, 'max': 1.0, 'mean': 1.0}, ('train', 'pickup'): {'min': 0.5, 'max': 1.0, 'mean': 0.897}, ('train', 'putdown'): {'min': 0.5, 'max': 1.0, 'mean': 0.95}, ('val', 'background'): {'min': 1.0, 'max': 1.0, 'mean': 1.0}, ('val', 'pickup'): {'min': 1.0, 'max': 1.0, 'mean': 1.0}, ('val', 'putdown'): {'min': 1.0, 'max': 1.0, 'mean': 1.0}}
+existing .local/track_b1_dataset manifest identical to rebuilt: True
+  events identical: True
+  candidates identical: True
+  clips identical: True
+  ignore_intervals identical: True
+metadata diffs: {}

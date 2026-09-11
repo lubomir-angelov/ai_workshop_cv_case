@@ -242,6 +242,10 @@ end; those smoke scores come from a 4-clip scratch split and mean nothing.
 
 ### 7.3 Reported by the CVAT branch, not reproduced here
 
+Since reproduced on this branch, see `results/TRACK_B1_REPRODUCTION_CVAT.md`: the frozen
+probe exactly; the fine-tuning experiment only approximately at window level and not as an
+experiment. The paragraph below is the original record.
+
 Annotation-conditioned, `cvat_b1_2026_09_09`, run on a Mac with transformers <5. Window
 macro F1: frozen probe 0.615, fine-tuned (last 2 blocks) 0.743. Fine-tuned validation
 event F1 is reported as **0.806 / 0.746** (tIoU 0.3 / 0.5; `TRACK_B1_CVAT.md`,
@@ -361,3 +365,48 @@ otherwise the comparison mixes a change of candidates with a change of crop.
 No full training run, full-dataset pose regeneration or bulk video download. The
 presentation, paper-figure, results-report and reproducibility-bundle scripts from the
 CVAT branch still point at its historical run directories.
+
+## 10. Loss weighting in the two trainers
+
+Documented as run; neither objective was changed (changing either would break the
+reproduction). Notation: batch of B windows, logits z_i, label y_i, per-window
+cross-entropy CE_i = −log softmax(z_i)[y_i], confidence weight s_i =
+`window_manifest.sample_weight` (1.0 for background and high/med-confidence event windows,
+`weight_low` = 0.5 for low-confidence ones; the 2026-09-09 train split has 123 pickup and
+44 putdown windows at 0.5), N_k = training windows of class k.
+
+| | frozen head (`scripts/train_track_b1_head.py`, cached embeddings) | pixel path (`scripts/train_track_b1.py` → `track_b1/train.py`) | legacy pose route (`track_b1/train.main`, historical baseline) |
+|---|---|---|---|
+| class weights c_k | N/(3·N_k), not normalised (2026-09-11 run: 0.416 / 2.904 / 3.969) | N/(3·N_k) normalised to mean 1 (`class_weights_from`; 0.171 / 1.195 / 1.634, same ratios) | N/(3·N_k) (`get_label_weights`) |
+| training loss | (1/B) Σ c_{y_i} · s_i · CE_i (`CrossEntropyLoss(weight=c, reduction="none")` × s_i, then `.mean()`) | (1/B) Σ s_i · CE_i: every batch carries `sample_weight`, so `train_one_epoch` always takes the unweighted `cross_entropy(..., reduction="none")` × s_i branch | (1/B) Σ s_i · CE_i (same `train_one_epoch`) |
+| where c_k enters | the loss | only `validate`'s loss (`CrossEntropyLoss(weight=c)`, mean = Σ c_{y_i} CE_i / Σ c_{y_i}), which is logged but drives neither selection nor early stopping (both use val macro F1) | sampler and validation loss |
+| sampling | uniform `randperm` per epoch, batch 64 | shuffle, batch 8; `--balanced-sampler` (1/N_k per window) exists but is off by default and was off in every recorded run | `WeightedRandomSampler` ∝ c_{y_i} · s_i (`create_dataloaders(use_weighted_sampling=True)`) |
+| normalisation | divides by B, not by Σ c·s, so a batch's loss scale depends on its class mix | divides by B | divides by B |
+| Gate B | separate probe, unweighted CE; does not touch the trained head | unweighted CE on a copy (warm head kept) | unweighted CE |
+
+So the frozen head **combines** class and confidence weights in the loss, while the pixel
+path **replaces** class weighting with confidence weights: its fine-tuning objective has no
+class balancing at all (no class weights in the loss, no balanced sampler), although it
+computes and logs class weights and `class_weights_from` documents why they are needed.
+
+Intended versus inherited, as far as the history shows (`git log -S`):
+
+* Frozen head: written on the CVAT branch (`d832815`) with both weights deliberately
+  multiplied. Intended.
+* Pixel path loss: the sample-weight branch dates from the original Task 12 trainer
+  (`d7fb847`), where class balance came from the weighted sampler of `create_dataloaders`
+  and confidence entered twice (sampler ∝ c·s, loss × s). The CVAT branch's
+  `scripts/train_track_b1.py` (`d832815`) replaced that loader with plain shuffling and
+  passed class weights into `train`, which the sample-weight branch never uses. Dropping
+  class balance from fine-tuning is therefore an inherited inconsistency, not a documented
+  choice; the fine-tuned models were trained this way (and start from a class-weighted
+  head when warm-started).
+
+Future experiment, separately named **`track_b1_consistent_loss_weighting`** (not run):
+one policy for both trainers, L = Σ c_{y_i} s_i CE_i / Σ c_{y_i} s_i with c_k = N/(3·N_k)
+normalised to mean 1, confidence counted once, no balanced sampler. Retrain the frozen
+head and the warm- and cold-head last-2-block fine-tunes under the current and the
+consistent policy with at least three seeds each, same dataset, splits, preprocessing and
+decode-selection rule; compare validation window macro F1 and per-item validation event
+F1 across seeds before reading the test day once. Until then, results from the two
+trainers differ in objective as well as in trainable parameters.

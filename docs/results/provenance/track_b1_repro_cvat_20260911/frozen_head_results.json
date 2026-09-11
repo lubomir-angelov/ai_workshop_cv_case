@@ -1,0 +1,31 @@
+{
+  "best_epoch": 37,
+  "final_epoch": 77,
+  "val_f1_macro": 0.614730298930164,
+  "val_f1_per_class": {
+    "background": 0.8831870357866306,
+    "pickup": 0.5285714285714287,
+    "putdown": 0.4324324324324324
+  },
+  "input_mode": "annotation",
+  "n_train": 5192,
+  "n_val": 973,
+  "class_weights": [
+    0.41602563858032227,
+    2.9038031101226807,
+    3.969419002532959
+  ],
+  "dataset_dir": ".local/track_b1_repro_cvat_20260911/dataset",
+  "embeddings_dir": "None",
+  "model_name": "MCG-NJU/videomae-base",
+  "output_dir": ".local/track_b1_repro_cvat_20260911/frozen_head",
+  "epochs": "300",
+  "batch_size": "64",
+  "learning_rate": "0.001",
+  "weight_decay": "0.01",
+  "dropout": "0.2",
+  "patience": "40",
+  "seed": "42",
+  "device": "cpu",
+  "skip_gate_b": "False"
+}
