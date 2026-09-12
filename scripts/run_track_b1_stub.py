@@ -4,21 +4,20 @@
 Validates: window extraction -> model forward -> temporal smoothing -> peak detection -> merging.
 Predictions will be random (untrained head), but the full pipeline wiring is proven.
 """
+
 from __future__ import annotations
 
 import csv
 import logging
+import os
 import sys
 from pathlib import Path
 
-import numpy as np
-import os
 import pandas as pd
 import torch
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 import torch.nn as nn
-
 from transformers import VideoMAEModel
 
 from pickup_putdown.layer1.track_b1.inference import (
@@ -119,8 +118,12 @@ def run():
         if (idx + 1) % 5 == 0:
             logger.info(f"Processed {idx + 1}/{len(candidates_df)} candidates")
 
-    predictions_df = pd.DataFrame(all_predictions) if all_predictions else pd.DataFrame(
-        columns=["pred_id", "clip_id", "type", "t_start", "t_end", "score", "model"]
+    predictions_df = (
+        pd.DataFrame(all_predictions)
+        if all_predictions
+        else pd.DataFrame(
+            columns=["pred_id", "clip_id", "type", "t_start", "t_end", "score", "model"]
+        )
     )
 
     output_path = OUTPUT_DIR / "predictions.csv"
@@ -133,12 +136,12 @@ def main() -> int:
     predictions_df = run()
     s = predictions_df.shape
 
-    print(f"\n{'='*60}")
-    print(f"Track B1 Inference (frozen VideoMAE + random head)")
-    print(f"{'='*60}")
+    print(f"\n{'=' * 60}")
+    print("Track B1 Inference (frozen VideoMAE + random head)")
+    print(f"{'=' * 60}")
     print(f"Candidates processed: {s[0]}")
     print(f"Predictions:          {s[1]}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     pred_file = OUTPUT_DIR / "predictions.csv"
     if pred_file.exists():

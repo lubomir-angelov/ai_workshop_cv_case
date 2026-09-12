@@ -97,7 +97,7 @@ confidence (weights for hand/shelf/trajectory, emission threshold).
 ```python
 machine = RepeatingInteractionStateMachine(config)
 events = machine.process(observations)  # batch
-event = machine.update(observation)     # incremental
+event = machine.update(observation)  # incremental
 ```
 
 ### Files
@@ -431,7 +431,10 @@ not `vlm_annotations/events.csv` (48, pre-dedup).
 
 ## Next
 
+- **Track B1: combined CVAT-supervised pipeline, `docs/TRACK_B1_INTEGRATION.md`**
+  (annotation-conditioned and deployment-input modes; commands for the next training
+  runs). Historical plan: `docs/PLAN_1B_HUMAN.md`.
 - Full-dataset inference on val split (currently only single-clip smoke tested)
 - Threshold tuning on held-out validation data
-- Track B1/B2: VideoMAE window classifiers
+- Track B2: cached temporal features
 - Layer 2/3: Qwen VLM verification and fusion

@@ -5,6 +5,7 @@ Validates full data flow: candidates + poses -> state machine -> output format.
 Predictions will be empty (stub classifiers return uniform probabilities),
 but the pipeline wiring is proven.
 """
+
 from __future__ import annotations
 
 import csv
@@ -21,8 +22,8 @@ from pickup_putdown.layer1.track_a.inference import (
 )
 from pickup_putdown.layer1.track_a.state_machine import StateMachineConfig
 from pickup_putdown.perception.shelf_regions import (
-    load_shelf_config,
     get_expanded_regions,
+    load_shelf_config,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -91,9 +92,9 @@ def main() -> int:
     result = run()
 
     s = result.summary
-    print(f"\n{'='*60}")
-    print(f"Track A Inference (stub classifiers)")
-    print(f"{'='*60}")
+    print(f"\n{'=' * 60}")
+    print("Track A Inference (stub classifiers)")
+    print(f"{'=' * 60}")
     print(f"Candidates total:       {s.candidates_total}")
     print(f"Candidates processed:   {s.candidates_processed}")
     print(f"Candidates skipped:     {s.candidates_skipped}")
@@ -105,7 +106,7 @@ def main() -> int:
     print(f"Final predictions:      {s.final_events_after_dedup}")
     print(f"  Pickups:              {s.pickup_count}")
     print(f"  Putdowns:             {s.putdown_count}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if result.diagnostics:
         print(f"\nDiagnostics ({len(result.diagnostics)} candidates):")
@@ -116,7 +117,6 @@ def main() -> int:
             if diag.skipped:
                 print(f"    Skip reason: {diag.skip_reason}")
 
-    output_dir = Path(result.output_paths.get("predictions_csv", OUTPUT_DIR))
     print(f"\nOutput files in {OUTPUT_DIR}:")
     if OUTPUT_DIR.exists():
         for f in sorted(OUTPUT_DIR.iterdir()):

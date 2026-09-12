@@ -184,10 +184,10 @@ def _decoder_worker(
     video_path: str,
     sample_frames: list[int],
     source_fps: float,
-    frame_queue: "Queue[FrameMetadata | None]",
-    slot_queue: "Queue[int]",
-    error_queue: "Queue[tuple[int, Exception]]",
-    shutdown_event: "EventType",
+    frame_queue: Queue[FrameMetadata | None],
+    slot_queue: Queue[int],
+    error_queue: Queue[tuple[int, Exception]],
+    shutdown_event: EventType,
     shm_name: str,
     frame_height: int,
     frame_width: int,
@@ -302,10 +302,10 @@ def _decoder_worker(
             # Get an available slot (blocks if buffer is full)
             try:
                 slot_index = slot_queue.get(timeout=10.0)
-            except Exception:
+            except Exception as err:
                 if shutdown_event.is_set():
                     break
-                raise TimeoutError(f"Worker {worker_id}: timeout waiting for slot")
+                raise TimeoutError(f"Worker {worker_id}: timeout waiting for slot") from err
 
             ret, frame = cap.read()
             decoder_position += 1
@@ -613,7 +613,7 @@ class DecoderPool:
 
         logger.debug("Decoder pool stopped")
 
-    def __enter__(self) -> "DecoderPool":
+    def __enter__(self) -> DecoderPool:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

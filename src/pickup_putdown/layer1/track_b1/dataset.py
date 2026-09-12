@@ -15,10 +15,14 @@ The output tensor shape is [T, C, H, W] where:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-from dataclasses import dataclass, field
+import os
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -27,7 +31,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 if TYPE_CHECKING:
-    from typing import Callable
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +74,19 @@ class WindowConfig:
     # Actor-conditioned crop
     crop_margin: float = 0.15  # 15% margin around actor+shelf union
 
+    # Which span the crop box is the union over:
+    #   "window"    — each window's own span (pose route; crop may change per window)
+    #   "candidate" — the whole candidate, fixed for all its windows (CVAT route and
+    #                 the per-candidate frame cache in cache.py)
+    crop_scope: str = "window"
+    # cv2 interpolation for the crop -> image_size resize: "linear" or "area".
+    resize_interpolation: str = "linear"
+    # Union the candidate's shelf-region polygon into the crop. Off by default because
+    # that is what every pose-route run actually did: shelf regions were read from a
+    # key configs/shelves.yaml does not have, so none were ever applied. Enabling it
+    # enlarges crops substantially (Shelf_01 spans ~half the frame); evaluate first.
+    include_shelf_region: bool = False
+
     # Label weights by confidence
     weight_high: float = 1.0
     weight_med: float = 1.0
@@ -77,6 +94,39 @@ class WindowConfig:
 
     # Validation
     min_event_overlap_ratio: float = 0.0  # Minimum overlap for center-based assignment
+
+    def __post_init__(self) -> None:
+        if self.crop_scope not in CROP_SCOPES:
+            raise ValueError(f"crop_scope must be one of {CROP_SCOPES}, got {self.crop_scope!r}")
+        if self.resize_interpolation not in INTERPOLATIONS:
+            raise ValueError(
+                f"resize_interpolation must be one of {sorted(INTERPOLATIONS)}, "
+                f"got {self.resize_interpolation!r}"
+            )
+        self.image_size = tuple(self.image_size)
+
+
+CROP_SCOPES = ("window", "candidate")
+INTERPOLATIONS = {"linear": cv2.INTER_LINEAR, "area": cv2.INTER_AREA}
+
+# Bump whenever decoding, frame sampling, cropping or colour handling changes the
+# pixels a given WindowConfig produces. Part of every cache key and run record.
+PREPROCESSING_VERSION = 2
+
+
+def preprocessing_spec(config: WindowConfig) -> dict:
+    """Every setting that determines the pixels of a window (never the label)."""
+    return {
+        "version": PREPROCESSING_VERSION,
+        "num_frames": int(config.num_frames),
+        "image_size": [int(v) for v in config.image_size],
+        "crop_margin": float(config.crop_margin),
+        "crop_scope": config.crop_scope,
+        "resize_interpolation": config.resize_interpolation,
+        "include_shelf_region": bool(config.include_shelf_region),
+        "frame_sampling": "linspace(int(start*fps), int(end*fps)-1, num_frames)",
+        "normalization": "bgr->rgb, imagenet mean/std",
+    }
 
 
 @dataclass
@@ -87,15 +137,17 @@ class WindowSample:
     clip_id: str
     candidate_id: str
     actor_id: str
-    region_id: Optional[str]
+    region_id: str | None
     window_start_s: float
     window_end_s: float
     label: int
     label_name: str
-    event_id: Optional[str] = None
-    event_confidence: Optional[str] = None
+    event_id: str | None = None
+    event_confidence: str | None = None
     sample_weight: float = 1.0
-    split: Optional[str] = None
+    split: str | None = None
+    candidate_start_s: float | None = None
+    candidate_end_s: float | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for DataFrame creation."""
@@ -113,6 +165,8 @@ class WindowSample:
             "event_confidence": self.event_confidence,
             "sample_weight": self.sample_weight,
             "split": self.split,
+            "candidate_start_s": self.candidate_start_s,
+            "candidate_end_s": self.candidate_end_s,
         }
 
 
@@ -127,9 +181,25 @@ def build_window_manifest(
     ignore_intervals_df: pd.DataFrame,
     clips_df: pd.DataFrame,
     config: WindowConfig,
-    split: Optional[str] = None,
+    split: str | None = None,
 ) -> pd.DataFrame:
     """Generate all training/validation/test windows with labels.
+
+    Labels come from the event whose interval contains the window centre. How an
+    event is attributed to a candidate depends on ``events_df``:
+
+    * no ``actor_id`` column — clip-level ground truth: any candidate in the clip
+      takes the label (historical behaviour; overlapping actors can receive each
+      other's labels, so a warning is logged when candidates overlap);
+    * ``actor_id`` column — actor-resolved ground truth in the *same identity
+      system* as ``candidates_df["actor_id"]``. A window takes a label only from
+      its own actor's events. A window centred in an event whose actor is null
+      (association failed or ambiguous) is excluded, never labelled background.
+      Pooled ``*untracked`` candidate actors are excluded inside every event.
+
+    CVAT interaction-track ids (``trk007``) and pose person ids are different
+    identity systems; map them with ``actor_association.associate_events`` first.
+    Disjoint identity systems raise instead of silently producing background.
 
     Args:
         candidates_df: DataFrame with candidate intervals (from Task 5).
@@ -144,11 +214,25 @@ def build_window_manifest(
     """
     all_samples: list[dict] = []
     sample_counter = 0
+    excluded = {"ignore": 0, "unresolved_actor": 0}
+
+    unknown = sorted(set(candidates_df["clip_id"]) - set(clips_df["clip_id"]))
+    if unknown:
+        raise ValueError(
+            f"{len(unknown)} candidate clip_id(s) missing from clips_df "
+            f"(e.g. {unknown[:3]}); normalise clip ids before building windows"
+        )
+    split_by_clip = dict(zip(clips_df["clip_id"], clips_df["split"], strict=True))
+
+    actor_resolved = "actor_id" in events_df.columns
+    if actor_resolved:
+        _check_shared_identity(candidates_df, events_df)
+    else:
+        _warn_clip_level_overlaps(candidates_df, events_df)
 
     # Filter by split if specified
     if split is not None:
-        clip_ids_in_split = set(clips_df[clips_df["split"] == split]["clip_id"])
-        candidates_df = candidates_df[candidates_df["clip_id"].isin(clip_ids_in_split)]
+        candidates_df = candidates_df[candidates_df["clip_id"].map(split_by_clip) == split]
 
     # Process each candidate
     for _, candidate in candidates_df.iterrows():
@@ -170,16 +254,18 @@ def build_window_manifest(
             )
             continue
 
-        # Get events for this clip
         clip_events = events_df[events_df["clip_id"] == clip_id]
+        own_events, unresolved_events = clip_events, clip_events.iloc[:0]
+        if actor_resolved:
+            if str(actor_id).endswith("untracked"):
+                own_events, unresolved_events = clip_events.iloc[:0], clip_events
+            else:
+                own_events = clip_events[clip_events["actor_id"] == actor_id]
+                unresolved_events = clip_events[clip_events["actor_id"].isna()]
 
         # Get ignore intervals for this clip
         clip_ignores = ignore_intervals_df[ignore_intervals_df["clip_id"] == clip_id]
-
-        # Get clip split
-        clip_split = clips_df[clips_df["clip_id"] == clip_id]["split"].iloc[0] if len(
-            clips_df[clips_df["clip_id"] == clip_id]
-        ) > 0 else None
+        clip_split = split_by_clip[clip_id]
 
         # Generate sliding windows for this candidate
         windows = _generate_windows_for_candidate(
@@ -193,13 +279,20 @@ def build_window_manifest(
             window_center = (win_start + win_end) / 2
 
             if _is_in_ignore_interval(window_center, clip_ignores):
+                excluded["ignore"] += 1
                 continue
 
             # Assign label based on window center
             label, event_id, event_confidence = _assign_window_label(
                 window_center=window_center,
-                events_df=clip_events,
+                events_df=own_events,
             )
+            if (
+                label == LABEL_BACKGROUND
+                and _assign_window_label(window_center, unresolved_events)[0] != LABEL_BACKGROUND
+            ):
+                excluded["unresolved_actor"] += 1
+                continue
 
             # Compute sample weight
             sample_weight = _compute_sample_weight(event_confidence, config)
@@ -222,6 +315,8 @@ def build_window_manifest(
                 event_confidence=event_confidence,
                 sample_weight=sample_weight,
                 split=clip_split,
+                candidate_start_s=float(window_start),
+                candidate_end_s=float(window_end),
             )
 
             all_samples.append(sample.to_dict())
@@ -230,7 +325,7 @@ def build_window_manifest(
 
     logger.info(
         f"Built window manifest: {len(manifest_df)} samples "
-        f"(split={split or 'all'})"
+        f"(split={split or 'all'}, excluded={excluded})"
     )
 
     if len(manifest_df) > 0:
@@ -238,6 +333,43 @@ def build_window_manifest(
         logger.info(f"Label distribution: {label_counts}")
 
     return manifest_df
+
+
+def _check_shared_identity(candidates_df: pd.DataFrame, events_df: pd.DataFrame) -> None:
+    """Refuse actor-resolved labels whose actor ids never appear among candidates."""
+    event_actors = set(events_df["actor_id"].dropna())
+    candidate_actors = set(candidates_df["actor_id"])
+    if event_actors and candidate_actors and not event_actors & candidate_actors:
+        raise ValueError(
+            "events_df['actor_id'] and candidates_df['actor_id'] share no ids "
+            f"(e.g. {sorted(event_actors)[:2]} vs {sorted(candidate_actors)[:2]}); "
+            "they are different identity systems. Associate events to candidate "
+            "actors first (actor_association.associate_events), or drop the "
+            "actor_id column for explicitly clip-level labels."
+        )
+
+
+def _warn_clip_level_overlaps(candidates_df: pd.DataFrame, events_df: pd.DataFrame) -> None:
+    """Clip-level labels are only safe while candidates of different actors never overlap."""
+    if events_df.empty or candidates_df.empty:
+        return
+    pairs = 0
+    for _, group in candidates_df.groupby("clip_id"):
+        rows = group.sort_values("window_start_s")[
+            ["actor_id", "window_start_s", "window_end_s"]
+        ].to_numpy()
+        for i in range(len(rows)):
+            for j in range(i + 1, len(rows)):
+                if rows[j][1] >= rows[i][2]:
+                    break
+                pairs += rows[i][0] != rows[j][0]
+    if pairs:
+        logger.warning(
+            "Clip-level labels (events have no actor_id): %d overlapping candidate pairs "
+            "belong to different actors, so one actor's event can label another "
+            "actor's crop. Use actor-resolved events to avoid this.",
+            pairs,
+        )
 
 
 def generate_sliding_windows(
@@ -340,10 +472,12 @@ class InferenceWindow:
     clip_id: str
     candidate_id: str
     actor_id: str
-    region_id: Optional[str]
+    region_id: str | None
     window_start_s: float
     window_end_s: float
     window_center_s: float
+    candidate_start_s: float | None = None
+    candidate_end_s: float | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -355,6 +489,8 @@ class InferenceWindow:
             "window_start_s": self.window_start_s,
             "window_end_s": self.window_end_s,
             "window_center_s": self.window_center_s,
+            "candidate_start_s": self.candidate_start_s,
+            "candidate_end_s": self.candidate_end_s,
         }
 
 
@@ -419,10 +555,14 @@ def generate_inference_windows(
                 window_start_s=win_start,
                 window_end_s=win_end,
                 window_center_s=(win_start + win_end) / 2,
+                candidate_start_s=float(cand_start),
+                candidate_end_s=float(cand_end),
             )
             all_windows.append(window)
 
-    logger.info(f"Generated {len(all_windows)} inference windows from {len(candidates_df)} candidates")
+    logger.info(
+        f"Generated {len(all_windows)} inference windows from {len(candidates_df)} candidates"
+    )
 
     return all_windows
 
@@ -468,6 +608,8 @@ def generate_inference_windows_for_candidate(
             window_start_s=win_start,
             window_end_s=win_end,
             window_center_s=(win_start + win_end) / 2,
+            candidate_start_s=float(cand_start),
+            candidate_end_s=float(cand_end),
         )
         for win_start, win_end in windows
     ]
@@ -476,7 +618,7 @@ def generate_inference_windows_for_candidate(
 def _assign_window_label(
     window_center: float,
     events_df: pd.DataFrame,
-) -> tuple[int, Optional[str], Optional[str]]:
+) -> tuple[int, str | None, str | None]:
     """Determine label based on window center vs event intervals.
 
     Uses center-based assignment: the label is determined by which event
@@ -534,7 +676,7 @@ def _is_in_ignore_interval(
 
 
 def _compute_sample_weight(
-    event_confidence: Optional[str],
+    event_confidence: str | None,
     config: WindowConfig,
 ) -> float:
     """Compute sample weight based on event confidence.
@@ -568,61 +710,54 @@ def decode_window_frames(
     start_s: float,
     end_s: float,
     num_frames: int,
-) -> Optional[np.ndarray]:
-    """Decode and uniformly sample frames from a video interval.
+    frame_transform: Callable | None = None,
+) -> np.ndarray | None:
+    """Seek once, decode forward, and optionally crop each selected frame.
 
-    Args:
-        video_path: Path to the video file.
-        start_s: Start timestamp in seconds.
-        end_s: End timestamp in seconds.
-        num_frames: Number of frames to sample.
-
-    Returns:
-        Array of shape [T, H, W, C] in uint8 BGR format, or None if failed.
+    Sampling indices are unchanged. Failed reads raise instead of silently
+    caching black/repeated frames with valid event labels.
     """
+    if num_frames < 1:
+        raise ValueError("num_frames must be positive")
     if not video_path.exists():
-        logger.error(f"Video file not found: {video_path}")
-        return None
-
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        logger.error(f"Failed to open video: {video_path}")
-        return None
-
+        raise FileNotFoundError(video_path)
+    # FFmpeg decoder threads are independent of cv2.setNumThreads().
+    if hasattr(cv2, "CAP_PROP_N_THREADS"):
+        cap = cv2.VideoCapture(str(video_path), cv2.CAP_FFMPEG, [cv2.CAP_PROP_N_THREADS, 1])
+        if not cap.isOpened():
+            cap.release()
+            cap = cv2.VideoCapture(str(video_path))
+    else:
+        cap = cv2.VideoCapture(str(video_path))
     try:
-        # Get video properties
-        video_fps = cap.get(cv2.CAP_PROP_FPS)
-        if video_fps <= 0:
-            logger.error(f"Invalid FPS for video: {video_path}")
-            return None
-
-        # Compute frame indices to extract
-        frame_indices = _compute_frame_indices(start_s, end_s, num_frames, video_fps)
-
-        frames: list[np.ndarray] = []
-
-        for frame_idx in frame_indices:
-            # Seek to frame
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-
-            if not ret or frame is None:
-                logger.warning(
-                    f"Failed to read frame {frame_idx} from {video_path}"
-                )
-                # Use previous frame or black frame as fallback
-                if frames:
-                    frames.append(frames[-1].copy())
-                else:
-                    # Create black frame with typical dimensions
-                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
-                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
-                    frames.append(np.zeros((height, width, 3), dtype=np.uint8))
-            else:
-                frames.append(frame)
-
-        return np.stack(frames, axis=0)  # [T, H, W, C]
-
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {video_path}")
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not np.isfinite(fps) or fps <= 0:
+            raise ValueError(f"Invalid FPS for {video_path}: {fps}")
+        indices = _compute_frame_indices(start_s, end_s, num_frames, fps)
+        if indices[0] < 0:
+            raise ValueError(f"Negative frame index for {video_path}")
+        if indices[0] and not cap.set(cv2.CAP_PROP_POS_FRAMES, indices[0]):
+            raise RuntimeError(f"Cannot seek to {indices[0]} in {video_path}")
+        frames = []
+        current = indices[0]
+        previous_index = None
+        selected = None
+        for target in indices:
+            if target != previous_index:
+                while current < target:
+                    if not cap.grab():
+                        raise RuntimeError(f"Decode failed at {current} in {video_path}")
+                    current += 1
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    raise RuntimeError(f"Decode failed at {target} in {video_path}")
+                current += 1
+                selected = frame_transform(frame) if frame_transform else frame
+                previous_index = target
+            frames.append(selected)
+        return np.stack(frames)
     finally:
         cap.release()
 
@@ -667,7 +802,7 @@ def _compute_frame_indices(
 
 def compute_actor_crop_box(
     pose_track_df: pd.DataFrame,
-    shelf_region: Optional[dict],
+    shelf_region: dict | None,
     start_s: float,
     end_s: float,
     margin: float,
@@ -707,7 +842,7 @@ def _union_actor_boxes(
     pose_track_df: pd.DataFrame,
     start_s: float,
     end_s: float,
-) -> Optional[tuple[float, float, float, float]]:
+) -> tuple[float, float, float, float] | None:
     """Merge all actor bounding boxes in time range.
 
     Args:
@@ -718,10 +853,11 @@ def _union_actor_boxes(
     Returns:
         Tuple of (x1, y1, x2, y2) or None if no boxes found.
     """
+    if pose_track_df.empty or "timestamp_s" not in pose_track_df.columns:
+        return None
+
     # Filter to time range
-    mask = (pose_track_df["timestamp_s"] >= start_s) & (
-        pose_track_df["timestamp_s"] <= end_s
-    )
+    mask = (pose_track_df["timestamp_s"] >= start_s) & (pose_track_df["timestamp_s"] <= end_s)
     relevant = pose_track_df[mask]
 
     if relevant.empty:
@@ -827,6 +963,7 @@ def apply_crop_and_resize(
     frames: np.ndarray,
     crop_box: tuple[int, int, int, int],
     target_size: tuple[int, int],
+    interpolation: str = "linear",
 ) -> np.ndarray:
     """Crop and resize frames to target resolution.
 
@@ -834,6 +971,7 @@ def apply_crop_and_resize(
         frames: Array of shape [T, H, W, C] in uint8 format.
         crop_box: (x1, y1, x2, y2) crop coordinates.
         target_size: (width, height) target resolution.
+        interpolation: Key of ``INTERPOLATIONS`` ("linear" is cv2's default).
 
     Returns:
         Array of shape [T, target_H, target_W, C] in uint8 format.
@@ -852,7 +990,9 @@ def apply_crop_and_resize(
             cropped = frame
 
         # Resize
-        resized = cv2.resize(cropped, (target_w, target_h))
+        resized = cv2.resize(
+            cropped, (target_w, target_h), interpolation=INTERPOLATIONS[interpolation]
+        )
         cropped_frames.append(resized)
 
     return np.stack(cropped_frames, axis=0)
@@ -894,6 +1034,139 @@ def normalize_frames(
 
 
 # ============================================================
+# SHARED WINDOW PREPROCESSING
+# ============================================================
+
+
+def crop_span(row: pd.Series, config: WindowConfig) -> tuple[float, float]:
+    """Time span whose actor boxes define a window's crop, per ``config.crop_scope``."""
+    if config.crop_scope == "window":
+        return float(row["window_start_s"]), float(row["window_end_s"])
+    if pd.isna(row.get("candidate_start_s")) or pd.isna(row.get("candidate_end_s")):
+        raise ValueError(
+            "crop_scope='candidate' needs candidate_start_s/candidate_end_s in the "
+            "manifest; rebuild it with build_window_manifest"
+        )
+    return float(row["candidate_start_s"]), float(row["candidate_end_s"])
+
+
+def prepare_window_frames(
+    video_path: Path,
+    actor_track: pd.DataFrame,
+    shelf_region: dict | None,
+    window_start_s: float,
+    window_end_s: float,
+    span: tuple[float, float],
+    config: WindowConfig,
+) -> np.ndarray:
+    """Decode, crop and resize one window: the single definition of model-input pixels.
+
+    Training, inference, frame caching and diagnostics all call this (the
+    per-candidate cache in ``cache.py`` reproduces it for ``crop_scope="candidate"``,
+    which a test asserts), so none of them can drift from the others.
+
+    Returns uint8 BGR frames of shape [T, H, W, C].
+    """
+    crop_box = None
+
+    def crop_frame(frame: np.ndarray) -> np.ndarray:
+        nonlocal crop_box
+        if crop_box is None:
+            height, width = frame.shape[:2]
+            crop_box = compute_actor_crop_box(
+                actor_track, shelf_region, span[0], span[1], config.crop_margin, (width, height)
+            )
+        return apply_crop_and_resize(
+            frame[None], crop_box, config.image_size, config.resize_interpolation
+        )[0]
+
+    return decode_window_frames(
+        video_path, window_start_s, window_end_s, config.num_frames, frame_transform=crop_frame
+    )
+
+
+def _file_fingerprint(path: Path) -> list:
+    """Identity of an input file for cache keys (assumes inputs stable during a run)."""
+    if not path.exists():
+        return [str(path.resolve()), None]
+    stat = path.stat()
+    return [str(path.resolve()), stat.st_size, stat.st_mtime_ns]
+
+
+_LEGACY_WINDOW_KEY_SPEC = {
+    "crop_scope": "window",
+    "resize_interpolation": "linear",
+    "include_shelf_region": False,
+}
+
+
+def load_shelf_regions(path: Path) -> dict[str, dict]:
+    """Shelf regions by id from configs/shelves.yaml (``cameras.<camera>.regions``).
+
+    Raises when the file defines no regions, instead of returning an empty mapping
+    that silently disables every shelf-conditioned crop.
+    """
+    import yaml
+
+    document = yaml.safe_load(Path(path).read_text()) or {}
+    regions = list(document.get("regions", []))
+    for camera in (document.get("cameras") or {}).values():
+        regions.extend(camera.get("regions", []))
+    if not regions:
+        raise ValueError(f"{path} defines no shelf regions")
+    return {region["region_id"]: region for region in regions}
+
+
+def effective_shelf_region(
+    shelf_regions: dict[str, dict], region_id: object, config: WindowConfig
+) -> dict | None:
+    """The shelf polygon a window's crop includes, or None (see include_shelf_region)."""
+    if not config.include_shelf_region or not isinstance(region_id, str) or not region_id:
+        return None
+    if region_id not in shelf_regions:
+        raise KeyError(f"shelf region {region_id!r} not in the loaded shelf regions")
+    return shelf_regions[region_id]
+
+
+def window_cache_relpath(
+    video_path: Path,
+    pose_file: Path,
+    actor_id: str,
+    window_start_s: float,
+    window_end_s: float,
+    shelf_region: dict | None,
+    span: tuple[float, float],
+    config: WindowConfig,
+) -> Path:
+    """Content-addressed path of one window in the per-window frame cache.
+
+    The key covers source video and actor-track file identity, window, shelf region
+    and every preprocessing setting, never the label, so relabelling reuses pixels
+    while any input or preprocessing change misses. Version-1 keys (written by the
+    pose route before crop scope and interpolation were configurable) are kept for
+    the settings they implied — window scope, linear resize, same decoder — so that
+    existing cache entries stay valid; any other setting adds the full spec.
+    """
+    key = {
+        "version": 1,
+        "video": _file_fingerprint(video_path),
+        "pose": _file_fingerprint(pose_file),
+        "actor": str(actor_id),
+        "start": float(window_start_s),
+        "end": float(window_end_s),
+        "frames": config.num_frames,
+        "size": list(config.image_size),
+        "margin": config.crop_margin,
+        "shelf": shelf_region,
+    }
+    spec = preprocessing_spec(config)
+    if {k: spec[k] for k in _LEGACY_WINDOW_KEY_SPEC} != _LEGACY_WINDOW_KEY_SPEC:
+        key.update(version=2, preprocessing=spec, span=[float(v) for v in span])
+    digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()
+    return Path(digest[:2]) / f"{digest}.npy"
+
+
+# ============================================================
 # PYTORCH DATASET
 # ============================================================
 
@@ -914,8 +1187,9 @@ class TrackB1Dataset(Dataset):
         pose_tracks_dir: Path,
         shelf_regions: dict[str, dict],
         config: WindowConfig,
-        clips_df: Optional[pd.DataFrame] = None,
-        transform: Optional[Callable] = None,
+        clips_df: pd.DataFrame | None = None,
+        transform: Callable | None = None,
+        cache_dir: Path | None = None,
     ) -> None:
         """Initialize dataset with manifest and paths.
 
@@ -935,6 +1209,9 @@ class TrackB1Dataset(Dataset):
         self.config = config
         self.clips_df = clips_df
         self.transform = transform
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
+        if self.cache_dir is not None:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Cache for pose tracks (loaded on demand)
         self._pose_cache: dict[str, pd.DataFrame] = {}
@@ -942,9 +1219,7 @@ class TrackB1Dataset(Dataset):
         # Validate manifest
         self._validate_manifest()
 
-        logger.info(
-            f"TrackB1Dataset initialized with {len(self.manifest)} samples"
-        )
+        logger.info(f"TrackB1Dataset initialized with {len(self.manifest)} samples")
 
     def _validate_manifest(self) -> None:
         """Check manifest has required columns."""
@@ -997,48 +1272,63 @@ class TrackB1Dataset(Dataset):
         # Get video path
         video_path = self._get_video_path(clip_id)
 
-        # Decode frames
-        frames = decode_window_frames(
-            video_path=video_path,
-            start_s=window_start,
-            end_s=window_end,
-            num_frames=self.config.num_frames,
+        pose_file = self.pose_tracks_dir / f"{clip_id}.parquet"
+        shelf_region = effective_shelf_region(self.shelf_regions, region_id, self.config)
+        span = crop_span(row, self.config)
+        cache_path = None
+        frames = None
+        expected_shape = (
+            self.config.num_frames,
+            self.config.image_size[1],
+            self.config.image_size[0],
+            3,
         )
-
-        if frames is None:
-            # Return zero tensor on failure
-            logger.warning(f"Failed to decode frames for sample {row['sample_id']}")
-            frames = np.zeros(
-                (self.config.num_frames, self.config.image_size[1],
-                 self.config.image_size[0], 3),
-                dtype=np.uint8,
+        if self.cache_dir is not None:
+            cache_path = self.cache_dir / window_cache_relpath(
+                video_path,
+                pose_file,
+                actor_id,
+                window_start,
+                window_end,
+                shelf_region,
+                span,
+                self.config,
             )
+            if cache_path.exists():
+                try:
+                    frames = np.load(cache_path, allow_pickle=False)
+                    if frames.shape != expected_shape or frames.dtype != np.uint8:
+                        raise ValueError("Invalid cached window shape/dtype")
+                except (OSError, ValueError, EOFError) as exc:
+                    logger.warning("Rebuilding invalid cache %s: %s", cache_path, exc)
+                    frames = None
 
-        # Get frame dimensions for cropping
-        frame_h, frame_w = frames.shape[1:3]
-
-        # Load pose track for actor-conditioned crop
-        pose_track = self._load_pose_track(clip_id, actor_id)
-
-        # Get shelf region
-        shelf_region = self.shelf_regions.get(region_id) if region_id else None
-
-        # Compute actor-conditioned crop box
-        crop_box = compute_actor_crop_box(
-            pose_track_df=pose_track,
-            shelf_region=shelf_region,
-            start_s=window_start,
-            end_s=window_end,
-            margin=self.config.crop_margin,
-            frame_size=(frame_w, frame_h),
-        )
-
-        # Apply crop and resize
-        frames = apply_crop_and_resize(
-            frames=frames,
-            crop_box=crop_box,
-            target_size=self.config.image_size,
-        )
+        cache_hit = frames is not None
+        if frames is None:
+            frames = prepare_window_frames(
+                video_path,
+                self._load_pose_track(clip_id, actor_id),
+                shelf_region,
+                window_start,
+                window_end,
+                span,
+                self.config,
+            )
+            if cache_path is not None:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                # Unique temp + atomic replace: concurrent workers may compute
+                # the same sample, but readers never see a partial .npy file.
+                temp_name = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        dir=cache_path.parent, suffix=".tmp", delete=False
+                    ) as stream:
+                        temp_name = stream.name
+                        np.save(stream, frames, allow_pickle=False)
+                    os.replace(temp_name, cache_path)
+                finally:
+                    if temp_name is not None and os.path.exists(temp_name):
+                        os.unlink(temp_name)
 
         # Normalize to tensor
         pixel_values = normalize_frames(frames)
@@ -1049,6 +1339,7 @@ class TrackB1Dataset(Dataset):
 
         return {
             "pixel_values": pixel_values,
+            "cache_hit": cache_hit,
             "label": label,
             "sample_id": row["sample_id"],
             "clip_id": clip_id,
@@ -1201,8 +1492,9 @@ def create_dataloaders(
     config: WindowConfig,
     batch_size: int = 8,
     num_workers: int = 4,
-    clips_df: Optional[pd.DataFrame] = None,
+    clips_df: pd.DataFrame | None = None,
     use_weighted_sampling: bool = True,
+    cache_dir: Path | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """Factory for train/val dataloaders.
 
@@ -1228,6 +1520,7 @@ def create_dataloaders(
         shelf_regions=shelf_regions,
         config=config,
         clips_df=clips_df,
+        cache_dir=cache_dir,
     )
 
     val_dataset = TrackB1Dataset(
@@ -1237,6 +1530,7 @@ def create_dataloaders(
         shelf_regions=shelf_regions,
         config=config,
         clips_df=clips_df,
+        cache_dir=cache_dir,
     )
 
     # Training sampler (weighted for class balance)
@@ -1252,12 +1546,22 @@ def create_dataloaders(
         sampler = None
         train_shuffle = True
 
+    worker_options = {}
+    if num_workers > 0:
+        worker_options = {
+            "persistent_workers": True,
+            "prefetch_factor": 1,
+            "worker_init_fn": _init_data_worker,
+            "multiprocessing_context": "spawn",
+        }
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=train_shuffle,
         sampler=sampler,
         num_workers=num_workers,
+        **worker_options,
         pin_memory=True,
         drop_last=True,
     )
@@ -1267,6 +1571,7 @@ def create_dataloaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        **worker_options,
         pin_memory=True,
         drop_last=False,
     )
@@ -1277,3 +1582,9 @@ def create_dataloaders(
     )
 
     return train_loader, val_loader
+
+
+def _init_data_worker(worker_id: int) -> None:
+    """Keep each worker's CPU libraries from oversubscribing the machine."""
+    cv2.setNumThreads(1)
+    torch.set_num_threads(1)

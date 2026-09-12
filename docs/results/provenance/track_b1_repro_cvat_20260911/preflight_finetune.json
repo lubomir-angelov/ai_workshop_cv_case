@@ -1,0 +1,75 @@
+{
+  "data_path": "CachedTrackB1Dataset (pixels from per-candidate crop cache); no embeddings loaded",
+  "trainable": {
+    "blocks": [
+      "10",
+      "11"
+    ],
+    "n_tensors": 36,
+    "n_params": 14179587,
+    "n_total_params": 86240259,
+    "head_tensors": [
+      "head.norm.weight",
+      "head.norm.bias",
+      "head.classifier.weight",
+      "head.classifier.bias"
+    ],
+    "frozen_top_level_modules": [
+      "embeddings",
+      "encoder",
+      "layernorm"
+    ]
+  },
+  "optimizer_groups": [
+    {
+      "lr": 0.001,
+      "n_tensors": 4,
+      "all_head": true,
+      "no_head": false
+    },
+    {
+      "lr": 5e-05,
+      "n_tensors": 32,
+      "all_head": false,
+      "no_head": true
+    }
+  ],
+  "warm_start_val_pixel_path": {
+    "f1_macro": 0.614730298930164,
+    "f1_per_class": {
+      "background": 0.8831870357866306,
+      "pickup": 0.5285714285714287,
+      "putdown": 0.4324324324324324
+    },
+    "head_trainer_val_f1_macro": 0.614730298930164
+  },
+  "gate_b": {
+    "passed": true,
+    "tensors_changed_in_trained_model": 0
+  },
+  "real_batch": {
+    "pixel_values_shape": [
+      8,
+      16,
+      3,
+      224,
+      224
+    ],
+    "labels": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      2,
+      0
+    ],
+    "loss": 0.49262604117393494,
+    "grad_norm_head": 4.663943767547607,
+    "grad_norm_backbone": 15.481496810913086,
+    "trainable_tensors_with_finite_nonzero_grad": 36,
+    "frozen_tensors_with_grad": 0
+  },
+  "peak_vram_gb": 4.375109632
+}

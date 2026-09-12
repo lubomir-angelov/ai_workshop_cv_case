@@ -631,7 +631,9 @@ class TestQwenClient:
         # Every call_vlm invocation should have max_attempts=1
         for call_args in mock_call.call_args_list:
             kwargs = call_args.kwargs if hasattr(call_args, "kwargs") else call_args[1]
-            assert kwargs.get("max_attempts") == 1, f"Expected max_attempts=1, got {kwargs.get('max_attempts')}"
+            assert kwargs.get("max_attempts") == 1, (
+                f"Expected max_attempts=1, got {kwargs.get('max_attempts')}"
+            )
 
     # -- 11. two Layer 2 attempts produce at most two model calls --
     def test_two_attempts_max_two_calls(self, tmp_path):

@@ -132,6 +132,7 @@ activemq-data/
 .env
 .envrc
 .venv
+.venv-arm64
 env/
 venv/
 ENV/

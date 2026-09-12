@@ -1,0 +1,93 @@
+{
+  "frozen_at": "2026-09-11T15:23:28+03:00",
+  "rule": {
+    "tuned_on": "deployment-input validation window scores only (window_scores_val.parquet from the A val run; scores do not depend on decode)",
+    "grid": {
+      "pickup_threshold": [
+        0.2,
+        0.25,
+        0.3,
+        0.35,
+        0.4,
+        0.45,
+        0.5,
+        0.55,
+        0.6,
+        0.7
+      ],
+      "putdown_threshold": [
+        0.2,
+        0.25,
+        0.3,
+        0.35,
+        0.4,
+        0.45,
+        0.5,
+        0.55,
+        0.6,
+        0.7
+      ],
+      "smoothing_window": [
+        3,
+        5
+      ]
+    },
+    "fixed": {
+      "same_type_merge_gap_s": 0.75,
+      "min_event_duration_s": 0.3,
+      "boundary_mode": "window_centers"
+    },
+    "objective": "mean per-item validation event F1 at tIoU 0.3 and 0.5 (shared evaluator, duplicate suppression applied)",
+    "tie_break": "lower smoothing, then lower pickup threshold, then lower putdown threshold (tune_track_b1_thresholds.py sort)",
+    "tool": "scripts/tune_track_b1_thresholds.py (defaults = this grid)",
+    "freeze": "selection written to deploy_calibration_selection.json before any test-split inference; never revised after"
+  },
+  "test_split_read": false,
+  "git_commit": "3d22096c709429662dea01362a72f7ae40d25449",
+  "models": {
+    "frozen_head": {
+      "checkpoint": {
+        "path": ".local/track_b1_repro_cvat_20260911/frozen_head/checkpoints/head_best.pt",
+        "sha256": "83d613f81206c6a9de3b9b3ff5289e97bf40872b0aa4fba6467acc85a576c0ba",
+        "verified_sha256": "83d613f81206c6a9de3b9b3ff5289e97bf40872b0aa4fba6467acc85a576c0ba"
+      },
+      "decode": {
+        "pickup_threshold": 0.7,
+        "putdown_threshold": 0.3,
+        "smoothing_window": 5,
+        "same_type_merge_gap_s": 0.75,
+        "min_event_duration_s": 0.3,
+        "boundary_mode": "window_centers"
+      },
+      "val_objective": 0.04838709677419356,
+      "n_grid_points_tied_at_best": 1,
+      "n_grid_points": 200,
+      "degenerate": false,
+      "chosen_file": ".local/track_b1_deploy_eval_20260911/frozen_head/B_calibration_sweep/chosen_thresholds_deployment_window_centers.json",
+      "chosen_file_sha256": "7471b1713ea2a400fa56c4b9f44c6090825d1b2016c1b6360ef53d985597f67a",
+      "window_scores_val_sha256": "fc571542395619d8f8b620ee940d74866dbc5c1784c8a775f5657c2d3d412af5"
+    },
+    "finetune_last2": {
+      "checkpoint": {
+        "path": ".local/track_b1_repro_cvat_20260911/finetune_last2/checkpoints/best_model.pt",
+        "sha256": "42f15aeca48f044bbb67fbae77ad50d57233960267c3a9d9821d8fee097e5bcd",
+        "verified_sha256": "42f15aeca48f044bbb67fbae77ad50d57233960267c3a9d9821d8fee097e5bcd"
+      },
+      "decode": {
+        "pickup_threshold": 0.2,
+        "putdown_threshold": 0.2,
+        "smoothing_window": 3,
+        "same_type_merge_gap_s": 0.75,
+        "min_event_duration_s": 0.3,
+        "boundary_mode": "window_centers"
+      },
+      "val_objective": 0.0,
+      "n_grid_points_tied_at_best": 200,
+      "n_grid_points": 200,
+      "degenerate": true,
+      "chosen_file": ".local/track_b1_deploy_eval_20260911/finetune_last2/B_calibration_sweep/chosen_thresholds_deployment_window_centers.json",
+      "chosen_file_sha256": "90f41538cf6d1904ea3d2b52cd87c5faa4a9fd3af7d3431a4c47a61ebc0e9932",
+      "window_scores_val_sha256": "ad99655f9418832d1f03efcf9cf8d0db1a1b04bedd9363c86943eadc12d3db5d"
+    }
+  }
+}

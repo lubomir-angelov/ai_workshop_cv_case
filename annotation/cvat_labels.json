@@ -1,0 +1,120 @@
+[
+  {
+    "name": "pickup",
+    "color": "#4CAF50",
+    "type": "rectangle",
+    "attributes": [
+      {
+        "name": "confidence",
+        "mutable": false,
+        "input_type": "select",
+        "default_value": "high",
+        "values": ["high", "med", "low"]
+      },
+      {
+        "name": "hard_case",
+        "mutable": false,
+        "input_type": "select",
+        "default_value": "false",
+        "values": ["false", "true"]
+      },
+      {
+        "name": "item_count",
+        "mutable": false,
+        "input_type": "number",
+        "default_value": "1",
+        "values": ["1", "10", "1"]
+      },
+      {
+        "name": "review_status",
+        "mutable": false,
+        "input_type": "select",
+        "default_value": "draft",
+        "values": ["draft", "reviewed", "accepted", "needs_adjudication"]
+      },
+      {
+        "name": "notes",
+        "mutable": true,
+        "input_type": "text",
+        "default_value": "",
+        "values": [""]
+      }
+    ]
+  },
+  {
+    "name": "putdown",
+    "color": "#2196F3",
+    "type": "rectangle",
+    "attributes": [
+      {
+        "name": "confidence",
+        "mutable": false,
+        "input_type": "select",
+        "default_value": "high",
+        "values": ["high", "med", "low"]
+      },
+      {
+        "name": "hard_case",
+        "mutable": false,
+        "input_type": "select",
+        "default_value": "false",
+        "values": ["false", "true"]
+      },
+      {
+        "name": "item_count",
+        "mutable": false,
+        "input_type": "number",
+        "default_value": "1",
+        "values": ["1", "10", "1"]
+      },
+      {
+        "name": "review_status",
+        "mutable": false,
+        "input_type": "select",
+        "default_value": "draft",
+        "values": ["draft", "reviewed", "accepted", "needs_adjudication"]
+      },
+      {
+        "name": "notes",
+        "mutable": true,
+        "input_type": "text",
+        "default_value": "",
+        "values": [""]
+      }
+    ]
+  },
+  {
+    "name": "ignore",
+    "color": "#FF9800",
+    "type": "rectangle",
+    "attributes": [
+      {
+        "name": "ignore_reason",
+        "mutable": false,
+        "input_type": "select",
+        "default_value": "ACTION_OCCLUDED",
+        "values": [
+          "ACTION_OCCLUDED",
+          "ACTION_OUT_OF_FRAME",
+          "CLIP_BOUNDARY",
+          "UNLABELABLE",
+          "CORRUPT_SECTION"
+        ]
+      },
+      {
+        "name": "review_status",
+        "mutable": false,
+        "input_type": "select",
+        "default_value": "draft",
+        "values": ["draft", "reviewed", "accepted", "needs_adjudication"]
+      },
+      {
+        "name": "notes",
+        "mutable": true,
+        "input_type": "text",
+        "default_value": "",
+        "values": [""]
+      }
+    ]
+  }
+]

@@ -1,0 +1,5 @@
+date: 2026-09-11T12:15:22+03:00
+commit: 65a3f07b4426432eaa306d95e25cb58fdaf5a316
+branch: feature/unify_track_b_trainings_and_eval
+status:
+python: /home/ubuntu/venvs/ai_workshop_cv_case/bin/python Python 3.13.5

@@ -106,9 +106,9 @@ Manages shared memory ring buffer for zero-copy frame passing.
 
 ```python
 buffer = SharedFrameBuffer(
-    n_slots=8,           # Number of frame slots
-    frame_height=2160,   # 4K height
-    frame_width=3840,    # 4K width
+    n_slots=8,  # Number of frame slots
+    frame_height=2160,  # 4K height
+    frame_width=3840,  # 4K width
 )
 buffer.write_frame(slot_index=0, frame=frame_data)
 frame = buffer.read_frame(slot_index=0)
@@ -164,11 +164,11 @@ class TriageConfig(BaseModel):
     # ... existing settings ...
 
     # Pipeline configuration
-    pipeline_enabled: bool = True           # Enable/disable pipelining
-    pipeline_queue_depth: int = 8           # Ring buffer slots
-    pipeline_n_decoders: int = 2            # Number of decoder workers
-    pipeline_resize_frames: bool = False    # Keep original resolution
-    pipeline_frame_size: tuple = (640, 640) # Only if resize_frames=True
+    pipeline_enabled: bool = True  # Enable/disable pipelining
+    pipeline_queue_depth: int = 8  # Ring buffer slots
+    pipeline_n_decoders: int = 2  # Number of decoder workers
+    pipeline_resize_frames: bool = False  # Keep original resolution
+    pipeline_frame_size: tuple = (640, 640)  # Only if resize_frames=True
     pipeline_frame_timeout_s: float = 30.0  # Timeout for frame retrieval
 ```
 

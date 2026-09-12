@@ -17,11 +17,11 @@ Training pipeline:
 
 from __future__ import annotations
 
+import copy
 import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
@@ -37,11 +37,10 @@ from pickup_putdown.layer1.track_b1.dataset import (
     build_window_manifest,
     create_dataloaders,
     get_label_weights,
+    load_shelf_regions,
 )
 from pickup_putdown.layer1.track_b1.videomae_classifier import (
-    VideoMAEClassifier,
     create_model,
-    load_checkpoint,
     save_checkpoint,
 )
 
@@ -76,20 +75,29 @@ class TrainConfig:
 
     # Tiny overfit test (Gate B)
     tiny_overfit_samples: int = 16
-    tiny_overfit_max_steps: int = 200
+    tiny_overfit_max_steps: int = 1000
     tiny_overfit_target_loss: float = 0.1
 
     # Logging
     log_every_n_steps: int = 10
 
+    # Prepared uint8 windows are cached lazily across epochs and restarts.
+    num_workers: int = 4
+    cache_frames: bool = True
+    frame_cache_dir: str = ".local/track_b1_frame_cache"
+
     # Model config
-    model_name: str = "MCG-NJU/videomae-small"
+    model_name: str = "MCG-NJU/videomae-base"
     freeze_backbone: bool = True
     unfreeze_last_n_blocks: int = 0
     dropout: float = 0.1
 
     # Device
     device: str = "auto"
+
+    # Learning rate for unfrozen encoder blocks. None means "same as the head", which
+    # is only sensible when the backbone is fully frozen.
+    backbone_lr: float | None = None
 
 
 # ============================================================
@@ -107,7 +115,7 @@ class EpochMetrics:
     f1_per_class: dict[str, float]
     precision_macro: float
     recall_macro: float
-    confusion_matrix: Optional[np.ndarray] = None
+    confusion_matrix: np.ndarray | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for logging/saving."""
@@ -146,7 +154,7 @@ def compute_metrics(
 
     # Confusion matrix
     confusion = np.zeros((num_classes, num_classes), dtype=np.int64)
-    for pred, true in zip(predictions, labels):
+    for pred, true in zip(predictions, labels, strict=True):
         confusion[true, pred] += 1
 
     # Per-class metrics
@@ -198,7 +206,7 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     config: TrainConfig,
-    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+    scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
 ) -> dict:
     """Train for one epoch.
 
@@ -224,19 +232,29 @@ def train_one_epoch(
     all_labels = []
 
     num_batches = len(dataloader)
-    log_interval = max(1, num_batches // 10)  # Log ~10 times per epoch
+    log_interval = max(1, config.log_every_n_steps)
 
     start_time = time.time()
 
+    last_batch_end = time.perf_counter()
+    data_wait_total = 0.0
+    compute_total = 0.0
+    logger.info("Waiting for first training batch (cold cache includes video decoding)...")
     for batch_idx, batch in enumerate(dataloader):
+        batch_ready = time.perf_counter()
+        data_wait = batch_ready - last_batch_end
+        data_wait_total += data_wait
         # Move data to device
-        pixel_values = batch["pixel_values"].to(device)
-        labels = batch["label"].to(device)
+        pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+        labels = batch["label"].to(device, non_blocking=True)
 
         # Get sample weights if available
         sample_weights = batch.get("sample_weight")
         if sample_weights is not None:
-            sample_weights = sample_weights.to(device)
+            # Default collation of Python floats yields float64, which MPS rejects.
+            sample_weights = sample_weights.to(
+                device=device, dtype=torch.float32, non_blocking=True
+            )
 
         # Forward pass
         optimizer.zero_grad()
@@ -272,18 +290,27 @@ def train_one_epoch(
         all_predictions.append(predictions.cpu())
         all_labels.append(labels.cpu())
 
+        # Scalar/CPU metric reads above synchronize GPU work, so this is
+        # transfer + compute + metrics wall time, not pure GPU kernel time.
+        compute_s = time.perf_counter() - batch_ready
+        compute_total += compute_s
         # Logging
-        if (batch_idx + 1) % log_interval == 0 or batch_idx == num_batches - 1:
+        if batch_idx == 0 or (batch_idx + 1) % log_interval == 0 or batch_idx == num_batches - 1:
             current_lr = optimizer.param_groups[0]["lr"]
             batch_acc = (predictions == labels).float().mean().item()
             logger.info(
                 f"Epoch {epoch} [{batch_idx + 1}/{num_batches}] "
-                f"loss={loss.item():.4f} acc={batch_acc:.4f} lr={current_lr:.2e}"
+                f"loss={loss.item():.4f} acc={batch_acc:.4f} lr={current_lr:.2e} "
+                f"data_wait={data_wait:.2f}s compute={compute_s:.2f}s "
+                f"avg_wait={data_wait_total / (batch_idx + 1):.2f}s "
+                f"avg_compute={compute_total / (batch_idx + 1):.2f}s "
+                f"cache_hits={int(batch['cache_hit'].sum()) if 'cache_hit' in batch else 0}/{labels.size(0)}"
             )
+
+        last_batch_end = time.perf_counter()
 
     # Compute epoch metrics
     epoch_loss = total_loss / total_samples
-    epoch_accuracy = total_correct / total_samples
     elapsed = time.time() - start_time
 
     all_predictions = torch.cat(all_predictions)
@@ -302,6 +329,7 @@ def train_one_epoch(
         "accuracy": metrics.accuracy,
         "f1_macro": metrics.f1_macro,
         "learning_rate": optimizer.param_groups[0]["lr"],
+        "learning_rates": [group["lr"] for group in optimizer.param_groups],
         "elapsed_seconds": elapsed,
     }
 
@@ -337,8 +365,8 @@ def validate(
     all_labels = []
 
     for batch in dataloader:
-        pixel_values = batch["pixel_values"].to(device)
-        labels = batch["label"].to(device)
+        pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+        labels = batch["label"].to(device, non_blocking=True)
 
         # Forward pass
         logits = model(pixel_values)
@@ -374,6 +402,64 @@ def validate(
 # ============================================================
 
 
+def _parameter_groups(model: nn.Module, config: TrainConfig) -> list[dict]:
+    """Split trainable parameters into head and unfrozen-backbone groups.
+
+    Returns a single group when no backbone rate is configured or nothing in the
+    encoder is trainable, so the frozen-backbone path is unchanged.
+    """
+    head_params, backbone_params = [], []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        (head_params if name.startswith("head.") else backbone_params).append(parameter)
+
+    if config.backbone_lr is None or not backbone_params:
+        return [{"params": head_params + backbone_params, "lr": config.learning_rate}]
+
+    logger.info(
+        "Discriminative learning rates: head %d tensors @ %g, backbone %d tensors @ %g",
+        len(head_params),
+        config.learning_rate,
+        len(backbone_params),
+        config.backbone_lr,
+    )
+    return [
+        {"params": head_params, "lr": config.learning_rate},
+        {"params": backbone_params, "lr": config.backbone_lr},
+    ]
+
+
+def _stratified_indices(dataset, num_samples: int) -> list[int]:
+    """Pick ``num_samples`` dataset indices spread as evenly as possible over classes.
+
+    Falls back to the leading indices when the dataset exposes no manifest to read
+    labels from.
+    """
+    manifest = getattr(dataset, "manifest", None)
+    if manifest is None or "label" not in getattr(manifest, "columns", []):
+        return list(range(num_samples))
+
+    by_label: dict[int, list[int]] = {}
+    for position, label in enumerate(manifest["label"].tolist()):
+        by_label.setdefault(int(label), []).append(position)
+
+    picked: list[int] = []
+    labels = sorted(by_label)
+    round_index = 0
+    while len(picked) < num_samples:
+        added = False
+        for label in labels:
+            if round_index < len(by_label[label]) and len(picked) < num_samples:
+                picked.append(by_label[label][round_index])
+                added = True
+        if not added:
+            break
+        round_index += 1
+
+    return picked
+
+
 def run_tiny_overfit_test(
     model: nn.Module,
     dataset: TrackB1Dataset,
@@ -398,9 +484,12 @@ def run_tiny_overfit_test(
     logger.info("GATE B: Running tiny overfit test")
     logger.info("=" * 60)
 
-    # Create tiny subset
+    # Create tiny subset, spread across classes. Taking the first N rows instead would
+    # draw them all from one candidate and almost always one class, and a model that
+    # memorises a single-class batch by collapsing to a constant proves nothing about
+    # the pipeline this gate exists to check.
     num_samples = min(config.tiny_overfit_samples, len(dataset))
-    indices = list(range(num_samples))
+    indices = _stratified_indices(dataset, num_samples)
     tiny_dataset = Subset(dataset, indices)
 
     tiny_loader = DataLoader(
@@ -421,14 +510,15 @@ def run_tiny_overfit_test(
 
     # Get the single batch
     batch = next(iter(tiny_loader))
-    pixel_values = batch["pixel_values"].to(device)
-    labels = batch["label"].to(device)
+    pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+    labels = batch["label"].to(device, non_blocking=True)
 
     logger.info(f"Tiny overfit test: {num_samples} samples")
     logger.info(f"Label distribution: {torch.bincount(labels, minlength=3).tolist()}")
 
-    # Training loop
-    model.train()
+    # Disable dropout for deterministic memorization.
+    # eval() still allows gradients and optimizer updates.
+    model.eval()
     initial_loss = None
 
     for step in range(config.tiny_overfit_max_steps):
@@ -445,9 +535,7 @@ def run_tiny_overfit_test(
         if (step + 1) % 20 == 0:
             predictions = logits.argmax(dim=-1)
             accuracy = (predictions == labels).float().mean().item()
-            logger.info(
-                f"Tiny overfit step {step + 1}: loss={loss.item():.4f} acc={accuracy:.4f}"
-            )
+            logger.info(f"Tiny overfit step {step + 1}: loss={loss.item():.4f} acc={accuracy:.4f}")
 
         # Success condition
         if loss.item() < config.tiny_overfit_target_loss:
@@ -564,7 +652,7 @@ class EarlyStopping:
         self.min_delta = min_delta
         self.mode = mode
         self.counter = 0
-        self.best_value: Optional[float] = None
+        self.best_value: float | None = None
         self._is_best = False
 
     def __call__(self, metric: float) -> bool:
@@ -612,7 +700,7 @@ def train(
     val_loader: DataLoader,
     config: TrainConfig,
     device: torch.device,
-    class_weights: Optional[torch.Tensor] = None,
+    class_weights: torch.Tensor | None = None,
     skip_tiny_overfit: bool = False,
 ) -> dict:
     """Main training loop.
@@ -648,11 +736,11 @@ def train(
     # Create checkpoint directory
     config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Gate B: Tiny overfit test
+    # Gate B: Tiny overfit test. It runs on a copy: re-creating the model afterwards
+    # would silently discard any warm-started head the caller loaded.
     if not skip_tiny_overfit:
-        # Note: This modifies model weights, so we'll reinitialize after
         test_passed = run_tiny_overfit_test(
-            model=model,
+            model=copy.deepcopy(model),
             dataset=train_loader.dataset,
             device=device,
             config=config,
@@ -664,26 +752,19 @@ def train(
                 "Check data pipeline and model architecture before proceeding."
             )
 
-        # Reinitialize model weights after tiny overfit test
-        logger.info("Reinitializing model for actual training...")
-        model = create_model(
-            model_name=config.model_name,
-            freeze_backbone=config.freeze_backbone,
-            unfreeze_last_n_blocks=config.unfreeze_last_n_blocks,
-            dropout=config.dropout,
-            device=str(device),
-        )
-
-    # Setup optimizer
+    # Setup optimizer. When backbone blocks are unfrozen they need a far smaller step
+    # than the head: the backbone is pretrained and the head is not, so a single rate
+    # either scrambles the backbone or leaves the head barely trained. Head keeps
+    # config.learning_rate; unfrozen encoder parameters get config.backbone_lr.
     optimizer = AdamW(
-        model.get_trainable_params(),
+        _parameter_groups(model, config),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
 
     # Setup loss function
     if class_weights is not None:
-        class_weights = class_weights.to(device)
+        class_weights = class_weights.to(device, non_blocking=True)
         criterion = nn.CrossEntropyLoss(weight=class_weights)
         logger.info(f"Using class weights: {class_weights.tolist()}")
     else:
@@ -707,8 +788,8 @@ def train(
 
     # Training history
     training_history = []
-    best_metrics: Optional[EpochMetrics] = None
-    best_checkpoint_path: Optional[Path] = None
+    best_metrics: EpochMetrics | None = None
+    best_checkpoint_path: Path | None = None
 
     # Training loop
     for epoch in range(config.num_epochs):
@@ -737,11 +818,13 @@ def train(
         )
 
         # Record history
-        training_history.append({
-            "epoch": epoch + 1,
-            "train": train_metrics,
-            "val": val_metrics.to_dict(),
-        })
+        training_history.append(
+            {
+                "epoch": epoch + 1,
+                "train": train_metrics,
+                "val": val_metrics.to_dict(),
+            }
+        )
 
         # Check if best
         should_stop = early_stopping(val_metrics.f1_macro)
@@ -777,6 +860,14 @@ def train(
             )
             break
 
+    final_checkpoint_path = save_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        epoch=epoch + 1,
+        metrics=val_metrics.to_dict(),
+        checkpoint_path=config.checkpoint_dir / "final_model.pt",
+    )
+
     # Training complete
     logger.info("\n" + "=" * 60)
     logger.info("TRAINING COMPLETE")
@@ -790,6 +881,7 @@ def train(
     return {
         "best_metrics": best_metrics.to_dict() if best_metrics else None,
         "best_checkpoint_path": str(best_checkpoint_path) if best_checkpoint_path else None,
+        "final_checkpoint_path": str(final_checkpoint_path),
         "training_history": training_history,
         "final_epoch": epoch + 1,
     }
@@ -808,8 +900,8 @@ def main(
     pose_tracks_dir: str,
     shelf_regions_path: str,
     output_dir: str,
-    ignore_intervals_path: Optional[str] = None,
-    config_path: Optional[str] = None,
+    ignore_intervals_path: str | None = None,
+    config_path: str | None = None,
     skip_tiny_overfit: bool = False,
 ) -> None:
     """CLI entry point for training.
@@ -855,23 +947,26 @@ def main(
     if ignore_intervals_path is not None:
         ignore_intervals_df = pd.read_parquet(ignore_intervals_path)
     else:
-        ignore_intervals_df = pd.DataFrame(
-            columns=["clip_id", "t_start", "t_end", "reason"]
-        )
+        ignore_intervals_df = pd.DataFrame(columns=["clip_id", "t_start", "t_end", "reason"])
 
     # Load shelf regions
-    with open(shelf_regions_path) as f:
-        shelf_regions_config = yaml.safe_load(f)
-    shelf_regions = {
-        r["region_id"]: r for r in shelf_regions_config.get("regions", [])
-    }
+    shelf_regions = load_shelf_regions(Path(shelf_regions_path))
 
     # Window config
-    window_config = WindowConfig(
-        window_duration_s=config_dict.get("window_duration_s", 2.5) if config_path else 2.5,
-        window_stride_s=config_dict.get("window_stride_s", 0.5) if config_path else 0.5,
-        num_frames=config_dict.get("num_frames", 16) if config_path else 16,
+    window_keys = (
+        "window_duration_s",
+        "window_stride_s",
+        "num_frames",
+        "image_size",
+        "crop_margin",
+        "crop_scope",
+        "resize_interpolation",
+        "include_shelf_region",
     )
+    window_config = WindowConfig(
+        **{k: config_dict[k] for k in window_keys if config_path and k in config_dict}
+    )
+    logger.info("Window config: %s", window_config)
 
     # Build manifests
     logger.info("Building window manifests...")
@@ -899,7 +994,11 @@ def main(
         raise ValueError("No validation samples found!")
 
     # Create dataloaders
-    logger.info("Creating dataloaders...")
+    logger.info(
+        "Creating dataloaders: workers=%d, frame_cache=%s",
+        config.num_workers,
+        config.frame_cache_dir if config.cache_frames else "disabled",
+    )
     train_loader, val_loader = create_dataloaders(
         train_manifest=train_manifest,
         val_manifest=val_manifest,
@@ -908,7 +1007,8 @@ def main(
         shelf_regions=shelf_regions,
         config=window_config,
         batch_size=config.batch_size,
-        num_workers=4,
+        num_workers=config.num_workers,
+        cache_dir=Path(config.frame_cache_dir) if config.cache_frames else None,
         clips_df=clips_df,
     )
 
@@ -919,9 +1019,12 @@ def main(
     # Create model
     logger.info("Creating model...")
     device = torch.device(
-        "cuda" if config.device == "auto" and torch.cuda.is_available()
-        else "mps" if config.device == "auto" and torch.backends.mps.is_available()
-        else "cpu" if config.device == "auto"
+        "cuda"
+        if config.device == "auto" and torch.cuda.is_available()
+        else "mps"
+        if config.device == "auto" and torch.backends.mps.is_available()
+        else "cpu"
+        if config.device == "auto"
         else config.device
     )
 
@@ -949,6 +1052,7 @@ def main(
     output_path.mkdir(parents=True, exist_ok=True)
 
     import json
+
     with open(output_path / "training_results.json", "w") as f:
         json.dump(results, f, indent=2)
 

@@ -29,12 +29,15 @@ Architecture:
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Optional
 
 import torch
 import torch.nn as nn
+from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file
 from transformers import VideoMAEConfig, VideoMAEModel
 
 logger = logging.getLogger(__name__)
@@ -50,16 +53,76 @@ LABEL_PICKUP: int = 1
 LABEL_PUTDOWN: int = 2
 
 # Default model configurations
-DEFAULT_MODEL_NAME: str = "MCG-NJU/videomae-small"
+DEFAULT_MODEL_NAME: str = "MCG-NJU/videomae-base"
 VIDEOMAE_SMALL_HIDDEN_DIM: int = 384
 VIDEOMAE_BASE_HIDDEN_DIM: int = 768
+
+
+# ============================================================
+# PRETRAINED WEIGHT LOADING
+# ============================================================
+
+
+def resolve_weights_path(model_name: str) -> Path:
+    """``model.safetensors`` for a local model directory or a HuggingFace repo id."""
+    local = Path(model_name)
+    if local.is_dir():
+        path = local / "model.safetensors"
+        if not path.is_file():
+            raise FileNotFoundError(f"{path} not found")
+        return path
+    return Path(hf_hub_download(repo_id=model_name, filename="model.safetensors"))
+
+
+def file_sha256(path: Path) -> str:
+    """Content hash identifying the exact pretrained weights (embedding-cache key)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def convert_encoder_state(
+    checkpoint: dict[str, torch.Tensor],
+    model_keys: Iterable[str],
+) -> dict[str, torch.Tensor]:
+    """Map a VideoMAE pretraining checkpoint onto the installed encoder's key layout.
+
+    Keeps only ``videomae.*`` (the reconstruction decoder is discarded). When the
+    model has ``query.bias`` but the checkpoint has ``q_bias``, the biases are moved
+    and the key bias is zero, which is what the legacy layout computes (it has no key
+    bias parameter). Any other mismatch is left for ``strict=True`` to reject.
+    """
+    prefix = "videomae."
+    state = {
+        name.removeprefix(prefix): tensor
+        for name, tensor in checkpoint.items()
+        if name.startswith(prefix)
+    }
+    if not state:
+        raise RuntimeError(f"checkpoint contains no {prefix!r} weights")
+
+    model_keys = set(model_keys)
+    for legacy in [k for k in state if k.endswith(".attention.attention.q_bias")]:
+        base = legacy.removesuffix(".q_bias")
+        if f"{base}.q_bias" in model_keys:
+            continue  # installed transformers still uses the legacy layout
+        for old, new in (("q_bias", "query.bias"), ("v_bias", "value.bias")):
+            if f"{base}.{new}" in state:
+                raise RuntimeError(f"Ambiguous checkpoint: both {base}.{old} and .{new}")
+            state[f"{base}.{new}"] = state.pop(f"{base}.{old}")
+        if f"{base}.key.bias" in model_keys:
+            state[f"{base}.key.bias"] = torch.zeros_like(state[f"{base}.query.bias"])
+    return state
 
 
 # ============================================================
 # CLASSIFICATION HEAD
 # ============================================================
 
-#TODO: If data set grows its better approach to have a classificationhead that is not just a simple matrix
+
+# TODO: If data set grows its better approach to have a classificationhead that is not just a simple matrix
 class ClassificationHead(nn.Module):
     """Lightweight MLP head for 3-class video classification.
 
@@ -176,7 +239,7 @@ class VideoMAEClassifier(nn.Module):
         self.unfreeze_last_n_blocks = unfreeze_last_n_blocks
 
         # Load pretrained encoder
-        #The VideoMAe obj 
+        # The VideoMAe obj
         self.encoder = self._load_encoder(model_name)
 
         # Get hidden dimension from encoder config
@@ -199,26 +262,36 @@ class VideoMAEClassifier(nn.Module):
         )
 
     def _load_encoder(self, model_name: str) -> VideoMAEModel:
-        """Load pretrained VideoMAE encoder from HuggingFace.
+        """Load the pretrained VideoMAE encoder strictly, never via ``from_pretrained``.
 
-        Args:
-            model_name: HuggingFace model identifier.
-
-        Returns:
-            Loaded VideoMAE encoder model.
+        ``from_pretrained`` silently random-initialises any parameter whose name it
+        cannot find. The MCG-NJU pretraining checkpoints store attention biases as
+        ``q_bias``/``v_bias``; transformers 5.x models expect ``query.bias``/
+        ``key.bias``/``value.bias`` instead, so part of the backbone would be random.
+        The checkpoint is converted to whatever layout the installed transformers
+        builds, then loaded with ``strict=True``.
         """
-        logger.info(f"Loading VideoMAE encoder from: {model_name}")
+        logger.info("Loading VideoMAE encoder from %s", model_name)
 
-        try:
-            encoder = VideoMAEModel.from_pretrained(model_name)
-            logger.info(
-                f"Encoder loaded: {encoder.config.num_hidden_layers} layers, "
-                f"hidden_size={encoder.config.hidden_size}"
-            )
-            return encoder
-        except Exception as e:
-            logger.error(f"Failed to load encoder: {e}")
-            raise
+        config = VideoMAEConfig.from_pretrained(model_name)
+        encoder = VideoMAEModel(config)
+        weights_path = resolve_weights_path(model_name)
+        state = convert_encoder_state(
+            load_file(str(weights_path), device="cpu"), encoder.state_dict().keys()
+        )
+        # Raises on missing/unexpected keys or incompatible tensor shapes.
+        encoder.load_state_dict(state, strict=True)
+        encoder.eval()
+        self.encoder_weights_sha256 = file_sha256(weights_path)
+
+        logger.info(
+            "Encoder loaded strictly: layers=%d, hidden_size=%d, weights=%s sha256=%s",
+            config.num_hidden_layers,
+            config.hidden_size,
+            weights_path,
+            self.encoder_weights_sha256[:12],
+        )
+        return encoder
 
     def _configure_freezing(
         self,
@@ -461,6 +534,7 @@ def save_checkpoint(
             "hidden_dim": model.hidden_dim,
             "freeze_backbone": model.freeze_backbone,
             "unfreeze_last_n_blocks": model.unfreeze_last_n_blocks,
+            "encoder_weights_sha256": getattr(model, "encoder_weights_sha256", None),
         },
     }
 
@@ -472,8 +546,8 @@ def save_checkpoint(
 
 def load_checkpoint(
     checkpoint_path: str | Path,
-    model: Optional[VideoMAEClassifier] = None,
-    optimizer: Optional[torch.optim.Optimizer] = None,
+    model: VideoMAEClassifier | None = None,
+    optimizer: torch.optim.Optimizer | None = None,
     device: str = "auto",
     strict: bool = True,
 ) -> dict:
@@ -500,7 +574,10 @@ def load_checkpoint(
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     resolved_device = _resolve_device(device)
-    checkpoint = torch.load(checkpoint_path, map_location=resolved_device)
+    # weights_only=False: our own checkpoints embed the epoch's metrics, which include
+    # numpy scalars that torch 2.6+ refuses to unpickle under the safe default. These
+    # files are written by this package's own save_checkpoint, not fetched from anywhere.
+    checkpoint = torch.load(checkpoint_path, map_location=resolved_device, weights_only=False)
 
     # Create model if not provided
     if model is None:

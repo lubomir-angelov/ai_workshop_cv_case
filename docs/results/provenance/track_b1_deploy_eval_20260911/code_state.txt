@@ -1,0 +1,5 @@
+runs executed 2026-09-11 15:12-15:48 from commit 3d22096 plus these working-tree files (committed unchanged with this directory):
+40c515848d594f272eb705f396d64f869f62a35de4b7346c538291ae5e8e3f31  configs/track_b1_deployment_candidate_crop.yaml
+8d93682a16e313bca113df56db8c51e37d507fc6b48f2c446387d75b693d2b1e  scripts/coverage_track_b1.py
+90c1d53722eff4f0b2ef928f51be9e5e9ff6c802237506d11e93dfc3d02204a4  src/pickup_putdown/layer1/track_b1/actor_association.py
+val_A coverage v1 (superseded, kept under */A_fixed_decoder/coverage_v1_superseded/) was produced before event_box_share_of_crop existed; all reported coverage is v2.

@@ -1,0 +1,47 @@
+{
+  "frozen_at": "2026-09-11T13:04:49+03:00",
+  "rule": "model = best validation window macro F1 checkpoint; decode = argmax mean(val event F1@0.3, F1@0.5) over tune_track_b1_thresholds.py default grid, ties -> lower thresholds/smoothing. Test read once per model with this decode; no changes after.",
+  "test_caveat": "20260526 (cvat_b1_2026_09_09 test day) was the human_b1 validation day and was read twice by the CVAT branch; it is a second development day, not an untouched test set.",
+  "models": {
+    "frozen_head": {
+      "checkpoint": ".local/track_b1_repro_cvat_20260911/frozen_head/checkpoints/head_best.pt",
+      "checkpoint_sha256": "83d613f81206c6a9de3b9b3ff5289e97bf40872b0aa4fba6467acc85a576c0ba",
+      "decode": {
+        "same_type_merge_gap_s": 0.75,
+        "min_event_duration_s": 0.3,
+        "boundary_mode": "window_centers",
+        "window_duration_s": 1.5,
+        "window_stride_s": 0.25,
+        "tiou": [
+          0.3,
+          0.5
+        ],
+        "pickup_threshold": 0.45,
+        "putdown_threshold": 0.6,
+        "smoothing_window": 3
+      },
+      "val_objective": 0.5373134328358209,
+      "chosen_file": ".local/track_b1_repro_cvat_20260911/frozen_head/eval/val_sweep/chosen_thresholds_annotation_window_centers.json"
+    },
+    "finetune_last2": {
+      "checkpoint": ".local/track_b1_repro_cvat_20260911/finetune_last2/checkpoints/best_model.pt",
+      "checkpoint_sha256": "42f15aeca48f044bbb67fbae77ad50d57233960267c3a9d9821d8fee097e5bcd",
+      "decode": {
+        "same_type_merge_gap_s": 0.75,
+        "min_event_duration_s": 0.3,
+        "boundary_mode": "window_centers",
+        "window_duration_s": 1.5,
+        "window_stride_s": 0.25,
+        "tiou": [
+          0.3,
+          0.5
+        ],
+        "pickup_threshold": 0.5,
+        "putdown_threshold": 0.2,
+        "smoothing_window": 3
+      },
+      "val_objective": 0.7571428571428571,
+      "chosen_file": ".local/track_b1_repro_cvat_20260911/finetune_last2/eval/val_sweep/chosen_thresholds_annotation_window_centers.json"
+    }
+  }
+}

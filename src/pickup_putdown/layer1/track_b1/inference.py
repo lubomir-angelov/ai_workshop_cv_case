@@ -22,7 +22,6 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -31,16 +30,15 @@ from torch.utils.data import DataLoader, Dataset
 
 from pickup_putdown.layer1.track_b1.dataset import (
     LABEL_BACKGROUND,
-    LABEL_NAMES,
     LABEL_PICKUP,
     LABEL_PUTDOWN,
     InferenceWindow,
     WindowConfig,
-    apply_crop_and_resize,
-    compute_actor_crop_box,
-    decode_window_frames,
+    crop_span,
     generate_inference_windows_for_candidate,
+    load_shelf_regions,
     normalize_frames,
+    prepare_window_frames,
 )
 from pickup_putdown.layer1.track_b1.videomae_classifier import (
     VideoMAEClassifier,
@@ -65,6 +63,9 @@ class InferenceConfig:
     num_frames: int = 16
     image_size: tuple[int, int] = (224, 224)
     crop_margin: float = 0.15
+    crop_scope: str = "window"  # see WindowConfig.crop_scope
+    resize_interpolation: str = "linear"  # see WindowConfig.resize_interpolation
+    include_shelf_region: bool = False  # see WindowConfig.include_shelf_region
 
     # Thresholds (tune on validation set)
     pickup_threshold: float = 0.5
@@ -76,6 +77,15 @@ class InferenceConfig:
     # Merging
     same_type_merge_gap_s: float = 0.75  # Merge same-type if gap < this
     min_event_duration_s: float = 0.3  # Discard events shorter than this
+
+    # How a run of above-threshold windows becomes an event interval.
+    #   "window_span"    — first window start to last window end (original behaviour)
+    #   "window_centers" — first to last window centre, widened by half a stride
+    # A window is much longer than a typical event here (2.5 s against a 0.9 s
+    # median), so "window_span" cannot emit an interval tighter than one window and
+    # caps achievable tIoU at roughly event_duration / window_duration. Centres carry
+    # the actual temporal evidence: a window is labelled by what sits at its centre.
+    boundary_mode: str = "window_span"
 
     # Output
     model_name: str = "layer1_track_b1_videomae_window_v1"
@@ -94,6 +104,9 @@ class InferenceConfig:
             num_frames=self.num_frames,
             image_size=self.image_size,
             crop_margin=self.crop_margin,
+            crop_scope=self.crop_scope,
+            resize_interpolation=self.resize_interpolation,
+            include_shelf_region=self.include_shelf_region,
         )
 
 
@@ -184,7 +197,7 @@ class InferenceWindowDataset(Dataset):
         windows: list[InferenceWindow],
         video_path: Path,
         pose_track_df: pd.DataFrame,
-        shelf_region: Optional[dict],
+        shelf_region: dict | None,
         config: InferenceConfig,
     ):
         self.windows = windows
@@ -207,44 +220,17 @@ class InferenceWindowDataset(Dataset):
                 - window_center_s: float
         """
         window = self.windows[idx]
-
-        # Decode frames for this window
-        frames = decode_window_frames(
-            video_path=self.video_path,
-            start_s=window.window_start_s,
-            end_s=window.window_end_s,
-            num_frames=self.config.num_frames,
-        )
-
-        if frames is None:
-            # Use zero tensor as fallback
-            logger.warning(
-                f"Failed to decode frames for window "
-                f"[{window.window_start_s:.2f}-{window.window_end_s:.2f}]"
-            )
-            frames = np.zeros(
-                (self.config.num_frames, self.config.image_size[1], self.config.image_size[0], 3),
-                dtype=np.uint8,
-            )
-
-        # Get frame dimensions
-        frame_h, frame_w = frames.shape[1:3]
-
-        # Compute actor-conditioned crop box
-        crop_box = compute_actor_crop_box(
-            pose_track_df=self.pose_track_df,
-            shelf_region=self.shelf_region,
-            start_s=window.window_start_s,
-            end_s=window.window_end_s,
-            margin=self.config.crop_margin,
-            frame_size=(frame_w, frame_h),
-        )
-
-        # Apply crop and resize
-        frames = apply_crop_and_resize(
-            frames=frames,
-            crop_box=crop_box,
-            target_size=self.config.image_size,
+        window_config = self.config.to_window_config()
+        span = crop_span(pd.Series(window.to_dict()), window_config)
+        shelf = self.shelf_region if window_config.include_shelf_region else None
+        frames = prepare_window_frames(
+            self.video_path,
+            self.pose_track_df,
+            shelf,
+            window.window_start_s,
+            window.window_end_s,
+            span,
+            window_config,
         )
 
         # Normalize to tensor
@@ -292,7 +278,7 @@ def predict_windows(
     windows: list[InferenceWindow],
     video_path: Path,
     pose_track_df: pd.DataFrame,
-    shelf_region: Optional[dict],
+    shelf_region: dict | None,
     config: InferenceConfig,
     device: torch.device,
 ) -> list[WindowPrediction]:
@@ -460,6 +446,8 @@ def detect_score_peaks(
         class_idx=LABEL_PICKUP,
         threshold=config.pickup_threshold,
         event_type="pickup",
+        boundary_mode=config.boundary_mode,
+        min_duration_s=config.min_event_duration_s,
     )
     regions.extend(pickup_regions)
 
@@ -469,6 +457,8 @@ def detect_score_peaks(
         class_idx=LABEL_PUTDOWN,
         threshold=config.putdown_threshold,
         event_type="putdown",
+        boundary_mode=config.boundary_mode,
+        min_duration_s=config.min_event_duration_s,
     )
     regions.extend(putdown_regions)
 
@@ -480,69 +470,73 @@ def _find_regions_above_threshold(
     class_idx: int,
     threshold: float,
     event_type: str,
+    boundary_mode: str = "window_span",
+    min_duration_s: float = 0.3,
 ) -> list[ScoreRegion]:
-    """Find contiguous regions where class score > threshold.
+    """Find contiguous runs where a class score exceeds its threshold.
 
     Args:
-        predictions: Window predictions (time-ordered).
+        predictions: Window predictions, in time order.
         class_idx: Class index to check (1=pickup, 2=putdown).
         threshold: Score threshold.
         event_type: Event type string for output.
+        boundary_mode: "window_span" or "window_centers"; see InferenceConfig.
+        min_duration_s: Floor applied in centre mode, where a single above-threshold
+            window would otherwise produce a zero-length interval.
 
     Returns:
         List of detected ScoreRegion.
     """
-    regions: list[ScoreRegion] = []
+    if boundary_mode not in ("window_span", "window_centers"):
+        raise ValueError(f"unknown boundary_mode {boundary_mode!r}")
 
+    regions: list[ScoreRegion] = []
     if not predictions:
         return regions
 
-    # Track current region
-    in_region = False
-    region_start = 0.0
-    region_end = 0.0
-    region_scores: list[float] = []
+    # Half the spacing between consecutive windows: the finest boundary this stride
+    # can resolve, and so the right amount to widen a centre-derived interval by.
+    if len(predictions) > 1:
+        half_stride = abs(predictions[1].window_center_s - predictions[0].window_center_s) / 2
+    else:
+        half_stride = min_duration_s / 2
 
-    for pred in predictions:
-        score = float(pred.probs[class_idx])
-
-        if score > threshold:
-            if not in_region:
-                # Start new region
-                in_region = True
-                region_start = pred.window_start_s
-                region_scores = [score]
-            else:
-                # Continue region
-                region_scores.append(score)
-            region_end = pred.window_end_s
+    def close(run: list[WindowPrediction], scores: list[float]) -> None:
+        if not run:
+            return
+        if boundary_mode == "window_span":
+            start_s, end_s = run[0].window_start_s, run[-1].window_end_s
         else:
-            if in_region:
-                # End region
-                regions.append(
-                    ScoreRegion(
-                        event_type=event_type,
-                        start_s=region_start,
-                        end_s=region_end,
-                        peak_score=max(region_scores),
-                        mean_score=np.mean(region_scores),
-                    )
-                )
-                in_region = False
-                region_scores = []
-
-    # Handle region at end
-    if in_region and region_scores:
+            start_s = run[0].window_center_s - half_stride
+            end_s = run[-1].window_center_s + half_stride
+            if end_s - start_s < min_duration_s:
+                centre = (start_s + end_s) / 2
+                start_s = centre - min_duration_s / 2
+                end_s = centre + min_duration_s / 2
+            start_s = max(0.0, start_s)
         regions.append(
             ScoreRegion(
                 event_type=event_type,
-                start_s=region_start,
-                end_s=region_end,
-                peak_score=max(region_scores),
-                mean_score=np.mean(region_scores),
+                start_s=start_s,
+                end_s=end_s,
+                peak_score=max(scores),
+                mean_score=float(np.mean(scores)),
             )
         )
 
+    run: list[WindowPrediction] = []
+    scores: list[float] = []
+
+    for prediction in predictions:
+        score = float(prediction.probs[class_idx])
+        if score > threshold:
+            run.append(prediction)
+            scores.append(score)
+        else:
+            close(run, scores)
+            run, scores = [], []
+
+    close(run, scores)
     return regions
 
 
@@ -681,6 +675,246 @@ def create_event_predictions(
     return predictions
 
 
+# ============================================================
+# DECODING PRECOMPUTED WINDOW SCORES (shared by inference and tuning scripts)
+# ============================================================
+
+
+def decode_window_scores(scores: pd.DataFrame, config: InferenceConfig) -> pd.DataFrame:
+    """Smooth -> peaks -> same-type merge per candidate, from a window-score table.
+
+    ``scores`` has one row per window with clip_id, candidate_id, actor_id,
+    window_start_s, window_end_s and p_background/p_pickup/p_putdown. Returns
+    canonical prediction rows (``EventPrediction.to_dict``), deterministically ordered.
+    """
+    rows: list[dict] = []
+    for (clip_id, candidate_id, actor_id), group in scores.groupby(
+        ["clip_id", "candidate_id", "actor_id"], sort=True
+    ):
+        group = group.sort_values("window_start_s")
+        probs = group[["p_background", "p_pickup", "p_putdown"]].to_numpy(dtype=float)
+        predictions = [
+            WindowPrediction(
+                window_start_s=float(start),
+                window_end_s=float(end),
+                window_center_s=(float(start) + float(end)) / 2,
+                probs=prob,
+                predicted_class=int(np.argmax(prob)),
+                confidence=float(np.max(prob)),
+            )
+            for start, end, prob in zip(
+                group["window_start_s"], group["window_end_s"], probs, strict=True
+            )
+        ]
+        smoothed = smooth_predictions(predictions, config.smoothing_window)
+        regions = detect_score_peaks(smoothed, config)
+        merged = merge_same_type_regions(
+            regions, config.same_type_merge_gap_s, config.min_event_duration_s
+        )
+        rows.extend(
+            event.to_dict()
+            for event in create_event_predictions(merged, clip_id, candidate_id, actor_id, config)
+        )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "pred_id",
+            "clip_id",
+            "type",
+            "t_start",
+            "t_end",
+            "score",
+            "model",
+            "candidate_id",
+            "actor_id",
+        ],
+    )
+
+
+def suppress_duplicate_events(predictions: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Drop same-type predictions of one actor that overlap a higher-scoring one.
+
+    Pose proposals can give one actor several overlapping candidates, each of which
+    decodes the same transfer; without this, one event yields a TP plus FPs. Opposite
+    types and different actors are never suppressed against each other.
+    """
+    if predictions.empty:
+        return predictions, 0
+    kept: list[int] = []
+    for _, group in predictions.groupby(["clip_id", "actor_id", "type"], sort=False):
+        chosen: list[tuple[float, float]] = []
+        for index, row in group.sort_values(
+            ["score", "pred_id"], ascending=[False, True]
+        ).iterrows():
+            if all(row["t_end"] <= start or row["t_start"] >= end for start, end in chosen):
+                chosen.append((row["t_start"], row["t_end"]))
+                kept.append(index)
+    result = predictions.loc[sorted(kept)].sort_values(["clip_id", "t_start", "type", "pred_id"])
+    return result.reset_index(drop=True), len(predictions) - len(kept)
+
+
+def _text(value: object, default: str) -> str:
+    return value if isinstance(value, str) and value else default
+
+
+# Ground-truth counting policies. Predictions are identical under both: the classifier
+# emits one interval per detection and no item count, so nothing is duplicated to match
+# item rows, and the evaluator matches each prediction to at most one GT row.
+#   per_item        — primary. One row per item (LABELING_GUIDELINES §5.1): an event with
+#                     item_count = N is N rows, so a single detection of it scores 1 TP
+#                     and N-1 FN (per-item recall on such events is capped at 1/N).
+#   per_event_group — historical comparison (the CVAT branch counted this way). The N
+#                     rows of one annotated event collapse to one row per
+#                     (clip_id, event_group_id).
+COUNTING_POLICIES = ("per_item", "per_event_group")
+PRIMARY_COUNTING_POLICY = "per_item"
+_GROUP_INVARIANTS = ("type", "t_start", "t_end", "actor_id")
+
+
+def ground_truth_for_policy(ground_truth: pd.DataFrame, policy: str) -> pd.DataFrame:
+    """GT rows to score against under ``policy`` (see ``COUNTING_POLICIES``).
+
+    Groups come only from explicit ``event_group_id`` provenance, scoped by clip; equal
+    timestamps never merge rows, so independent simultaneous events, different actors
+    and adjacent opposite-type events stay separate. Raises on missing group ids or on
+    a group whose rows disagree on type, interval or actor, or whose size contradicts
+    ``item_count`` / ``item_index``.
+    """
+    if policy not in COUNTING_POLICIES:
+        raise ValueError(
+            f"unknown counting policy {policy!r}; expected one of {COUNTING_POLICIES}"
+        )
+    if policy == "per_item" or ground_truth.empty:
+        return ground_truth
+    if "event_group_id" not in ground_truth.columns:
+        raise ValueError("per_event_group counting needs an event_group_id column")
+    group_ids = ground_truth["event_group_id"]
+    missing = group_ids.isna() | (group_ids.astype(str).str.strip() == "")
+    if missing.any():
+        raise ValueError(
+            f"{int(missing.sum())} GT rows lack event_group_id "
+            f"(e.g. {ground_truth.loc[missing, 'event_id'].head(3).tolist()}); "
+            "per_event_group counting will not guess their grouping"
+        )
+    invariants = [c for c in _GROUP_INVARIANTS if c in ground_truth.columns]
+    kept: list[pd.Series] = []
+    for (clip_id, group_id), rows in ground_truth.groupby(
+        ["clip_id", "event_group_id"], sort=True, dropna=False
+    ):
+        conflicting = [c for c in invariants if rows[c].nunique(dropna=False) > 1]
+        if conflicting:
+            raise ValueError(
+                f"event group {group_id!r} in {clip_id} is ambiguous: rows differ in {conflicting}"
+            )
+        if "item_count" in rows.columns:
+            counts = set(rows["item_count"].astype(int))
+            if counts != {len(rows)}:
+                raise ValueError(
+                    f"event group {group_id!r} in {clip_id} has {len(rows)} rows "
+                    f"but item_count {sorted(counts)}"
+                )
+        if "item_index" in rows.columns and sorted(rows["item_index"].astype(int)) != list(
+            range(len(rows))
+        ):
+            raise ValueError(f"event group {group_id!r} in {clip_id} has inconsistent item_index")
+        order = "item_index" if "item_index" in rows.columns else "event_id"
+        kept.append(rows.sort_values(order).iloc[0])
+    return pd.DataFrame(kept).reset_index(drop=True)
+
+
+def ground_truth_counts(ground_truth: pd.DataFrame) -> dict[str, int]:
+    """Item rows, annotated event groups and distinct (clip, type, interval) spans."""
+    return {
+        "item_rows": int(len(ground_truth)),
+        "event_groups": int(
+            len(ground_truth_for_policy(ground_truth, "per_event_group"))
+            if not ground_truth.empty
+            else 0
+        ),
+        "distinct_intervals": int(
+            ground_truth[["clip_id", "type", "t_start", "t_end"]].drop_duplicates().shape[0]
+        ),
+    }
+
+
+def evaluate_events_by_policy(
+    predictions: pd.DataFrame,
+    ground_truth: pd.DataFrame,
+    ignores: pd.DataFrame,
+    clip_durations: dict[str, float],
+    tiou_thresholds: tuple[float, ...] = (0.3, 0.5),
+) -> dict[str, dict]:
+    """``evaluate_events`` under every counting policy, with the GT counts each used."""
+    return {
+        policy: {
+            "n_ground_truth_rows": int(len(truth)),
+            **evaluate_events(predictions, truth, ignores, clip_durations, tiou_thresholds),
+        }
+        for policy in COUNTING_POLICIES
+        for truth in [ground_truth_for_policy(ground_truth, policy)]
+    }
+
+
+def evaluate_events(
+    predictions: pd.DataFrame,
+    ground_truth: pd.DataFrame,
+    ignores: pd.DataFrame,
+    clip_durations: dict[str, float],
+    tiou_thresholds: tuple[float, ...] = (0.3, 0.5),
+) -> dict:
+    """Score canonical predictions with the shared Task 8 evaluator.
+
+    ``ground_truth`` must hold every reviewed event of the evaluated clips, including
+    events no candidate covered; ``clip_durations`` must include reviewed clips with no
+    events. Ignore intervals are applied inside ``aggregate_metrics``.
+    """
+    from pickup_putdown.evaluation.contracts import (
+        EvaluationEvent,
+        EvaluationIgnoreInterval,
+        EvaluationPrediction,
+    )
+    from pickup_putdown.evaluation.metrics import aggregate_metrics
+
+    truth = [
+        EvaluationEvent(
+            event_id=row.event_id,
+            clip_id=row.clip_id,
+            type=row.type,
+            t_start=float(row.t_start),
+            t_end=float(row.t_end),
+            confidence=_text(getattr(row, "confidence", None), "high"),
+            hard_case=bool(getattr(row, "hard_case", False)),
+            group_id=_text(getattr(row, "event_group_id", None), ""),
+        )
+        for row in ground_truth.itertuples()
+    ]
+    predicted = [
+        EvaluationPrediction(
+            pred_id=row.pred_id,
+            clip_id=row.clip_id,
+            type=row.type,
+            t_start=float(row.t_start),
+            t_end=float(row.t_end),
+            score=float(row.score),
+            model=row.model,
+        )
+        for row in predictions.itertuples()
+    ]
+    ignore_rows = [
+        EvaluationIgnoreInterval(
+            clip_id=row.clip_id, t_start=float(row.t_start), t_end=float(row.t_end)
+        )
+        for row in ignores.itertuples()
+    ]
+    return aggregate_metrics(
+        events=truth,
+        preds=predicted,
+        clip_durations=clip_durations,
+        ignores=ignore_rows,
+        tiou_thresholds=tuple(tiou_thresholds),
+    )
+
+
 def _generate_pred_id(
     clip_id: str,
     candidate_id: str,
@@ -703,7 +937,7 @@ def infer_candidate(
     candidate: pd.Series,
     video_path: Path,
     pose_track_df: pd.DataFrame,
-    shelf_region: Optional[dict],
+    shelf_region: dict | None,
     config: InferenceConfig,
     device: torch.device,
 ) -> list[EventPrediction]:
@@ -957,7 +1191,7 @@ def main(
     pose_tracks_dir: str,
     shelf_regions_path: str,
     output_path: str,
-    config_path: Optional[str] = None,
+    config_path: str | None = None,
     pickup_threshold: float = 0.5,
     putdown_threshold: float = 0.5,
 ) -> None:
@@ -1006,9 +1240,7 @@ def main(
     clips_df = pd.read_csv(clips_path)
 
     # Load shelf regions
-    with open(shelf_regions_path) as f:
-        shelf_regions_config = yaml.safe_load(f)
-    shelf_regions = {r["region_id"]: r for r in shelf_regions_config.get("regions", [])}
+    shelf_regions = load_shelf_regions(Path(shelf_regions_path))
 
     # Load model
     logger.info(f"Loading model from {checkpoint_path}")
@@ -1025,7 +1257,9 @@ def main(
     model.eval()
 
     logger.info(f"Model loaded, device={device}")
-    logger.info(f"Thresholds: pickup={config.pickup_threshold}, putdown={config.putdown_threshold}")
+    logger.info(
+        f"Thresholds: pickup={config.pickup_threshold}, putdown={config.putdown_threshold}"
+    )
 
     # Run inference
     predictions_df = infer_all_candidates(

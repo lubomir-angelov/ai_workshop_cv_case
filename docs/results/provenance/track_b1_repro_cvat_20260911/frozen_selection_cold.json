@@ -1,0 +1,16 @@
+{
+  "frozen_at": "2026-09-11T14:18:00+03:00",
+  "purpose": "diagnostic: fine-tune without warm-started head (CVAT-code behaviour when Gate B was not skipped)",
+  "rule": "same as frozen_selection.json",
+  "checkpoint": ".local/track_b1_repro_cvat_20260911/finetune_last2_cold/checkpoints/best_model.pt",
+  "checkpoint_sha256": "06c36083b809eb42178f8158536f57ad88fd55ca0411600218ffbcd7f9dbe7ad",
+  "decode": {
+    "pickup_threshold": 0.4,
+    "putdown_threshold": 0.35,
+    "smoothing_window": 5,
+    "same_type_merge_gap_s": 0.75,
+    "min_event_duration_s": 0.3,
+    "boundary_mode": "window_centers"
+  },
+  "val_objective": 0.7391304347826086
+}

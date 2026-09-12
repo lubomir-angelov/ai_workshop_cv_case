@@ -1,0 +1,16 @@
+torch 2.14.0
+torchvision 0.29.0
+transformers 5.16.1
+numpy 2.5.3
+pandas 3.0.5
+opencv-python 5.0.0.93
+opencv-python-headless 5.0.0.93
+pyarrow 25.0.1
+scikit-learn 1.9.0
+pyyaml 6.0.3
+huggingface-hub 1.30.0
+safetensors 0.8.0
+cuda 13.0 available True NVIDIA GeForce RTX 5090
+cudnn 92400
+platform Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.35
+ffprobe version 4.4.2-0ubuntu0.22.04.1 Copyright (c) 2007-2021 the FFmpeg developers

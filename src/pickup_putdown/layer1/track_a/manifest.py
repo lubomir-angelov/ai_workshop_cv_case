@@ -402,7 +402,7 @@ def get_manifest_stats(manifest_path: Path | str) -> dict:
             "hand": crop_types.count("hand"),
             "shelf": crop_types.count("shelf"),
         },
-        "unique_batches": len(set(b for b in batch_ids if b is not None)),
+        "unique_batches": len({b for b in batch_ids if b is not None}),
         "encoder": encoder_names[0] if encoder_names else None,
     }
 
@@ -427,7 +427,7 @@ def list_batches(manifest_path: Path | str) -> list[dict]:
 
     # Group by batch
     batches: dict[str, dict] = {}
-    for batch_id, created_at in zip(batch_ids, created_ats):
+    for batch_id, created_at in zip(batch_ids, created_ats, strict=True):
         key = batch_id or "unknown"
         if key not in batches:
             batches[key] = {"batch_id": batch_id, "count": 0, "created_at": created_at}
